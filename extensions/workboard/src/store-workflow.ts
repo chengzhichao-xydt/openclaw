@@ -13,6 +13,7 @@ import {
   appendEvent,
   assertCanMutateClaimedCard,
   capText,
+  cardBoardId,
   cardChildIds,
   cardParentIds,
   cardRunId,
@@ -26,7 +27,6 @@ import {
   MAX_CARD_ARTIFACTS,
   MAX_CARD_COMMENTS,
   MAX_CARD_NOTIFICATIONS,
-  MAX_CARD_PROOF,
   secondsToDurationMs,
 } from "./store-constants.js";
 import type {
@@ -44,6 +44,7 @@ import type {
   WorkboardSpecifyInput,
 } from "./store-inputs.js";
 import {
+  appendCompletionProof,
   clearDiagnostics,
   deriveChildIdempotencyKey,
   normalizeArtifact,
@@ -91,10 +92,15 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
         ttlSeconds ? secondsToDurationMs(ttlSeconds) : DEFAULT_CLAIM_TTL_MS,
       );
       const guarded = await this.promoteDependencyReady(id, now);
+      if (guarded.metadata?.archivedAt) {
+        throw new Error("card is archived.");
+      }
       const expectedAuthority = options.expectedAuthority;
       if (
         expectedAuthority &&
-        (guarded.agentId !== expectedAuthority.agentId ||
+        (guarded.status !== expectedAuthority.status ||
+          cardBoardId(guarded) !== expectedAuthority.boardId ||
+          guarded.agentId !== expectedAuthority.agentId ||
           !isDeepStrictEqual(
             guarded.metadata?.automation?.workspace,
             expectedAuthority.workspace,
@@ -248,6 +254,13 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
       input.proof && typeof input.proof === "object" && !Array.isArray(input.proof)
         ? (input.proof as WorkboardProofInput)
         : undefined;
+    const proofId = normalizeBoundedString(input.proofId, undefined, 120, "proof id");
+    if (input.proofId !== undefined && !proofId) {
+      throw new Error("proofId must be a non-empty string.");
+    }
+    if (proofId && !proofInput) {
+      throw new Error("proof is required when proofId is provided.");
+    }
     const proof = proofInput ? normalizeProofInput(proofInput, now) : undefined;
     const artifacts = Array.isArray(input.artifacts)
       ? input.artifacts
@@ -293,7 +306,7 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
                 { id: randomUUID(), body: summary, createdAt: now },
               ].slice(-MAX_CARD_COMMENTS)
             : metadata.comments,
-          proof: proof ? [...(metadata.proof ?? []), proof].slice(-MAX_CARD_PROOF) : metadata.proof,
+          proof: proof ? appendCompletionProof(metadata.proof, proof, proofId) : metadata.proof,
           artifacts: artifacts.length
             ? [...(metadata.artifacts ?? []), ...artifacts].slice(-MAX_CARD_ARTIFACTS)
             : metadata.artifacts,
@@ -302,7 +315,10 @@ export class WorkboardWorkflowStore extends WorkboardPromoteStore {
           ),
         },
       },
-      { enforceStatusHolds: true },
+      {
+        enforceStatusHolds: true,
+        ...(proof ? { preserveProofId: proofId ?? proof.id } : {}),
+      },
     );
   }
 

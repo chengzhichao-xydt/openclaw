@@ -7,7 +7,8 @@ import {
 } from "../../../test/helpers/cron/service-regression-fixtures.js";
 import * as cronStoreModule from "../store.js";
 import { loadCronStore, saveCronStore } from "../store.js";
-import { run, stop } from "./ops.js";
+import { stop } from "./ops-lifecycle.js";
+import { run } from "./ops-run.js";
 import { createCronServiceState } from "./state.js";
 import { runMissedJobs } from "./timer.js";
 import { onTimer } from "./timer.test-support.js";
@@ -46,10 +47,11 @@ describe("cron service run admission cleanup", () => {
       const saveSpy = vi
         .spyOn(cronStoreModule, "saveCronJobsStore")
         .mockImplementation(async (storePath, nextStore, opts) => {
-          const runningAtMs = nextStore.jobs.find((entry) => entry.id === job.id)?.state
-            .runningAtMs;
+          const nextState = nextStore.jobs.find((entry) => entry.id === job.id)?.state;
+          const queuedAtMs = nextState?.queuedAtMs;
+          const runningAtMs = nextState?.runningAtMs;
           await realSave(storePath, nextStore, opts);
-          if (!reservationPersisted && runningAtMs === dueAt) {
+          if (!reservationPersisted && queuedAtMs === dueAt) {
             reservationPersisted = true;
             now = dueAt + 1;
           } else if (reservationPersisted && runningAtMs === dueAt + 1) {
@@ -110,14 +112,14 @@ describe("cron service run admission cleanup", () => {
       const saveSpy = vi
         .spyOn(cronStoreModule, "saveCronJobsStore")
         .mockImplementation(async (storePath, nextStore, opts) => {
-          const runningAtMs = nextStore.jobs.find((entry) => entry.id === job.id)?.state
-            .runningAtMs;
-          if (reservationPersisted && !cleanupFailed && runningAtMs === undefined) {
+          const nextState = nextStore.jobs.find((entry) => entry.id === job.id)?.state;
+          const queuedAtMs = nextState?.queuedAtMs;
+          if (reservationPersisted && !cleanupFailed && queuedAtMs === undefined) {
             cleanupFailed = true;
             throw new Error("reservation cleanup persist failed");
           }
           await realSave(storePath, nextStore, opts);
-          if (!reservationPersisted && runningAtMs === dueAt) {
+          if (!reservationPersisted && queuedAtMs === dueAt) {
             reservationPersisted = true;
             stop(state);
           }
@@ -177,14 +179,15 @@ describe("cron service run admission cleanup", () => {
       const saveSpy = vi
         .spyOn(cronStoreModule, "saveCronJobsStore")
         .mockImplementation(async (storePath, nextStore, opts) => {
-          const runningAtMs = nextStore.jobs.find((entry) => entry.id === job.id)?.state
-            .runningAtMs;
+          const nextState = nextStore.jobs.find((entry) => entry.id === job.id)?.state;
+          const queuedAtMs = nextState?.queuedAtMs;
+          const runningAtMs = nextState?.runningAtMs;
           if (reservationPersisted && !activationFailed && runningAtMs === dueAt + 1) {
             activationFailed = true;
             throw new Error("activation persist failed");
           }
           await realSave(storePath, nextStore, opts);
-          if (!reservationPersisted && runningAtMs === dueAt) {
+          if (!reservationPersisted && queuedAtMs === dueAt) {
             reservationPersisted = true;
             now = dueAt + 1;
           }
@@ -243,14 +246,20 @@ describe("cron service run admission cleanup", () => {
       const saveSpy = vi
         .spyOn(cronStoreModule, "saveCronJobsStore")
         .mockImplementation(async (storePath, nextStore, opts) => {
-          const runningAtMs = nextStore.jobs.find((entry) => entry.id === job.id)?.state
-            .runningAtMs;
-          if (activationPersisted && !cleanupFailed && runningAtMs === undefined) {
+          const nextState = nextStore.jobs.find((entry) => entry.id === job.id)?.state;
+          const queuedAtMs = nextState?.queuedAtMs;
+          const runningAtMs = nextState?.runningAtMs;
+          if (
+            activationPersisted &&
+            !cleanupFailed &&
+            queuedAtMs === undefined &&
+            runningAtMs === undefined
+          ) {
             cleanupFailed = true;
             throw new Error("cleanup persist failed");
           }
           await realSave(storePath, nextStore, opts);
-          if (!reservationPersisted && runningAtMs === dueAt) {
+          if (!reservationPersisted && queuedAtMs === dueAt) {
             reservationPersisted = true;
             now = dueAt + 1;
           } else if (reservationPersisted && runningAtMs === dueAt + 1) {
@@ -309,13 +318,14 @@ describe("cron service run admission cleanup", () => {
       const saveSpy = vi
         .spyOn(cronStoreModule, "saveCronJobsStore")
         .mockImplementation(async (storePath, nextStore, opts) => {
-          const runningAtMs = nextStore.jobs.find((entry) => entry.id === job.id)?.state
-            .runningAtMs;
-          if (activationPersisted && runningAtMs === undefined) {
+          const nextState = nextStore.jobs.find((entry) => entry.id === job.id)?.state;
+          const queuedAtMs = nextState?.queuedAtMs;
+          const runningAtMs = nextState?.runningAtMs;
+          if (activationPersisted && queuedAtMs === undefined && runningAtMs === undefined) {
             throw new Error("terminal cleanup persist failed");
           }
           await realSave(storePath, nextStore, opts);
-          if (!reservationPersisted && runningAtMs === dueAt) {
+          if (!reservationPersisted && queuedAtMs === dueAt) {
             reservationPersisted = true;
             now = dueAt + 1;
           } else if (reservationPersisted && runningAtMs === dueAt + 1) {

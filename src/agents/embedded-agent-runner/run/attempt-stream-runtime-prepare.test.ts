@@ -90,7 +90,7 @@ function createFixture(options: { aborted?: boolean } = {}) {
     order.push("guards");
     return {
       cacheObservabilityEnabled: true,
-      promptCacheToolNames: new Set(["read"]),
+      promptCacheTools: [{ name: "read" }],
     };
   });
   mocks.prepareHistory.mockImplementation(async () => {
@@ -133,7 +133,7 @@ function createFixture(options: { aborted?: boolean } = {}) {
     trackPromptSettlePromise,
     compactionTimeoutMs: 1_000,
     guards: {},
-    history: {},
+    history: { sandboxed: false },
     stream: {},
     lifecycle: {
       isYieldDetected: () => false,
@@ -194,7 +194,7 @@ describe("prepareEmbeddedAttemptStreamRuntime", () => {
       expect.objectContaining({
         cache: {
           observabilityEnabled: true,
-          promptToolNames: new Set(["read"]),
+          promptTools: [{ name: "read" }],
         },
         history: expect.objectContaining({ contextEngineAssemblySucceeded: true }),
         isProbeSession: false,

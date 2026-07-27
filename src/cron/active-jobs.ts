@@ -15,6 +15,7 @@ export type CronActiveJobMarker = {
   jobId: string;
   generation: number;
   token: number;
+  scheduleMutated?: true;
   legacy?: boolean;
   preserveAcrossGenerationAdvance?: boolean;
 };
@@ -118,6 +119,20 @@ export function clearCronJobActive(jobId: string, marker?: CronActiveJobMarker) 
   notifyActiveCronJobWaitersIfEmpty(state);
 }
 
+/** Records a durable schedule edit against the exact run that was active for it. */
+export function noteActiveCronJobScheduleMutation(jobId: string): void {
+  if (!jobId) {
+    return;
+  }
+  const state = getCronActiveJobState();
+  const marker = state.activeJobs.get(jobId);
+  if (marker && isMarkerActiveInGeneration(marker, state.generation)) {
+    // Keep mutation history on the admitted run: A→B→A has the original
+    // schedule value but still belongs to the operator's newer edit.
+    marker.scheduleMutated = true;
+  }
+}
+
 /** Returns whether the given cron job id is currently executing in this process. */
 export function isCronJobActive(jobId: string) {
   if (!jobId) {
@@ -142,6 +157,22 @@ export function isCronActiveJobMarkerCurrent(marker: CronActiveJobMarker | undef
 /** Returns whether any cron run is active in this process. */
 export function hasActiveCronJobs() {
   return getActiveCronJobCountForGeneration(getCronActiveJobState()) > 0;
+}
+
+/**
+ * Ignore only the caller's own marker. Unrelated runs must still block its wake,
+ * because cron jobs may execute concurrently.
+ */
+export function hasActiveCronJobsExceptMarker(markerToIgnore: CronActiveJobMarker) {
+  const state = getCronActiveJobState();
+  for (const marker of state.activeJobs.values()) {
+    const isIgnoredMarker =
+      marker.jobId === markerToIgnore.jobId && marker.token === markerToIgnore.token;
+    if (!isIgnoredMarker && isMarkerActiveInGeneration(marker, state.generation)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Returns the number of active cron runs in this process. */
