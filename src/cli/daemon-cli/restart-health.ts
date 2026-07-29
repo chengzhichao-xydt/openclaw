@@ -1,8 +1,8 @@
 // Restart health probes for gateway service restarts and port listener recovery.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import type { PluginHealthErrorSummary } from "../../commands/health.types.js";
 import type { GatewayServiceRuntime } from "../../daemon/service-runtime.js";
 import type { GatewayService } from "../../daemon/service.js";
+import type { PluginHealthErrorSummary } from "../../gateway/health/types.js";
 import { classifyPortListener, inspectPortUsage, type PortUsage } from "../../infra/ports.js";
 import {
   hasActiveStartupMigrationLease,
@@ -279,6 +279,7 @@ export async function waitForGatewayHealthyRestart(params: {
   expectedVersion?: string | null;
   includeUnknownListenersAsStale?: boolean;
   requireRunningService?: boolean;
+  supervisorKeepsAlive?: boolean;
   isStartupMigrationActive?: typeof hasActiveStartupMigrationLease;
 }): Promise<GatewayRestartSnapshot> {
   const startedAtMs = performance.now();
@@ -328,7 +329,12 @@ export async function waitForGatewayHealthyRestart(params: {
     if (snapshot.staleGatewayPids.length > 0 && snapshot.runtime.status !== "running") {
       return withWaitContext(snapshot, "stale-pids", elapsedMs);
     }
-    if (shouldEarlyExitStoppedFree(snapshot, attempt, minAttemptForEarlyExit)) {
+    // launchd KeepAlive can report a transient stopped state while its throttle window runs.
+    // Let the bounded standard deadline decide failure when the caller knows supervision persists.
+    if (
+      !params.supervisorKeepsAlive &&
+      shouldEarlyExitStoppedFree(snapshot, attempt, minAttemptForEarlyExit)
+    ) {
       consecutiveStoppedFreeCount += 1;
       if (consecutiveStoppedFreeCount >= STOPPED_FREE_THRESHOLD) {
         return withWaitContext(snapshot, "stopped-free", elapsedMs);

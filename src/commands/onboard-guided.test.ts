@@ -4,7 +4,7 @@ import { createWizardPrompter } from "../../test/helpers/wizard-prompter.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { CallGatewayCliOptions } from "../gateway/call.js";
 import { createSuiteLogPathTracker } from "../logging/log-test-helpers.js";
-import { resetLogger, setLoggerOverride } from "../logging/logger.js";
+import { flushLogger, resetLogger, setLoggerOverride } from "../logging/logger.js";
 import { loggingState } from "../logging/state.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -49,6 +49,9 @@ const readConfigFileSnapshot = vi.hoisted(() =>
 const logPathTracker = createSuiteLogPathTracker("openclaw-guided-onboard-log-");
 
 vi.mock("../config/config.js", () => ({ readConfigFileSnapshot }));
+vi.mock("./onboard-agent.js", () => ({
+  ensureOnboardingAgent: async ({ config }: { config: OpenClawConfig }) => ({ config }),
+}));
 
 vi.mock("./onboard-helpers.js", () => ({
   DEFAULT_WORKSPACE: "/tmp/openclaw-workspace",
@@ -78,7 +81,7 @@ function existingModelCandidate() {
   return {
     kind: "existing-model",
     label: "Current model",
-    detail: "already configured",
+    detail: "acme/workspace-model — already configured",
     modelRef: "acme/workspace-model",
     recommended: false,
     credentials: true,
@@ -100,6 +103,20 @@ function detection(
   };
 }
 
+function setupApplyResult() {
+  return {
+    configPath: "/tmp/openclaw.json",
+    configHashBefore: null,
+    configHashAfter: null,
+    bootstrapPending: false,
+    lines: [],
+  };
+}
+
+function recommendationOutcome(config: OpenClawConfig) {
+  return { config, commitResult: vi.fn() };
+}
+
 function setupDeps(params: {
   prompter: WizardPrompter;
   detect?: GuidedOnboardingDeps["detect"];
@@ -108,23 +125,22 @@ function setupDeps(params: {
   persistRiskAcknowledgement?: GuidedOnboardingDeps["persistRiskAcknowledgement"];
   runSetupMemoryImportStep?: GuidedOnboardingDeps["runSetupMemoryImportStep"];
   runAppRecommendations?: GuidedOnboardingDeps["runAppRecommendations"];
+  runBrowserHandoff?: GuidedOnboardingDeps["runBrowserHandoff"];
+  probeBrowserHandoffGateway?: GuidedOnboardingDeps["probeBrowserHandoffGateway"];
   applySetup?: GuidedOnboardingDeps["applySetup"];
   handoffMode?: GuidedOnboardingDeps["handoffMode"];
+  platform?: NodeJS.Platform;
 }) {
   const runSystemAgentChat = vi.fn<NonNullable<GuidedOnboardingDeps["runSystemAgentChat"]>>(
     params.runSystemAgentChat ?? (async () => {}),
   );
+  const runSetupMemoryImportStep = vi.fn<
+    NonNullable<GuidedOnboardingDeps["runSetupMemoryImportStep"]>
+  >(params.runSetupMemoryImportStep ?? (async () => ({ status: "skipped", providers: [] })));
   return {
     createPrompter: () => params.prompter,
     persistAccessMode: vi.fn(async () => undefined),
-    applySetup:
-      params.applySetup ??
-      vi.fn(async () => ({
-        configPath: "/tmp/openclaw.json",
-        configHashBefore: null,
-        configHashAfter: null,
-        lines: [],
-      })),
+    applySetup: params.applySetup ?? vi.fn(async () => setupApplyResult()),
     launchHatchTui: vi.fn(async () => undefined),
     listManualOptions: vi.fn(async () => ({
       manualProviders: [],
@@ -142,9 +158,20 @@ function setupDeps(params: {
         lines: ["Workspace: /tmp/work", "Gateway: running"],
       })),
     persistRiskAcknowledgement: params.persistRiskAcknowledgement ?? vi.fn(async () => undefined),
-    runSetupMemoryImportStep: params.runSetupMemoryImportStep ?? vi.fn(async () => undefined),
-    runAppRecommendations: params.runAppRecommendations ?? vi.fn(async ({ config }) => config),
+    runSetupMemoryImportStep,
+    runAppRecommendations:
+      params.runAppRecommendations ?? vi.fn(async ({ config }) => recommendationOutcome(config)),
+    runBrowserHandoff:
+      params.runBrowserHandoff ??
+      (vi.fn(async () => ({
+        handedOff: false as const,
+        reason: "timeout" as const,
+      })) as GuidedOnboardingDeps["runBrowserHandoff"]),
+    probeBrowserHandoffGateway:
+      params.probeBrowserHandoffGateway ??
+      (vi.fn(async () => ({ ok: false })) as GuidedOnboardingDeps["probeBrowserHandoffGateway"]),
     runSystemAgentChat,
+    platform: params.platform ?? "linux",
     ...(params.handoffMode ? { handoffMode: params.handoffMode } : {}),
   } satisfies GuidedOnboardingDeps;
 }
@@ -177,143 +204,96 @@ describe("runGuidedOnboarding", () => {
     await logPathTracker.cleanup();
   });
 
-  it("auto-connects one credentialed candidate before any workspace prompt", async () => {
-    const persistedConfig: OpenClawConfig = {
-      agents: { defaults: { model: { primary: "claude-cli/opus" } } },
-    };
-    const appliedConfig: OpenClawConfig = {
-      ...persistedConfig,
-      gateway: { mode: "local" },
-    };
-    readConfigFileSnapshot
-      .mockResolvedValueOnce({
-        exists: false,
-        valid: true,
-        path: "/tmp/openclaw.json",
-        issues: [],
-        config: {},
-      })
-      .mockResolvedValueOnce({
-        exists: true,
-        valid: true,
-        path: "/tmp/openclaw.json",
-        issues: [],
-        config: persistedConfig,
-      })
-      .mockResolvedValueOnce({
-        exists: true,
-        valid: true,
-        path: "/tmp/openclaw.json",
-        issues: [],
-        config: appliedConfig,
-      });
-    const select = vi.fn(async () => "unexpected") as unknown as WizardPrompter["select"];
-    const text = vi.fn(async () => "unexpected");
-    const prompter = createWizardPrompter({
-      text,
-      select,
-      confirm: vi.fn(async () => false),
-    });
-    const applySetup = vi.fn(async () => ({
-      configPath: "/tmp/openclaw.json",
-      configHashBefore: null,
-      configHashAfter: null,
-      lines: [],
-    }));
+  it("hands the custodian hatch to the browser on Linux after apply and recommendations", async () => {
+    const prompter = createWizardPrompter();
+    const applySetup = vi.fn(async () => setupApplyResult());
     const runAppRecommendations = vi.fn<NonNullable<GuidedOnboardingDeps["runAppRecommendations"]>>(
-      async ({ config }) => config,
+      async ({ config }) => recommendationOutcome(config),
     );
-    const deps = setupDeps({ prompter, applySetup, runAppRecommendations });
-    const runtime = makeRuntime();
-
-    await runGuidedOnboarding({ acceptRisk: true, workspace: "/tmp/work" }, runtime, deps);
-
-    expect(deps.activate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "claude-cli",
-        modelRef: "claude-cli/opus",
-        workspace: "/tmp/work",
-        surface: "cli",
-      }),
-    );
-    expect(text).not.toHaveBeenCalled();
-    expect(deps.launchHatchTui).toHaveBeenCalledWith("/tmp/work");
-    expect(applySetup).toHaveBeenCalledWith(
-      expect.objectContaining({ workspace: "/tmp/work", surface: "cli" }),
-    );
-    expect(deps.runSystemAgentChat).not.toHaveBeenCalled();
-    expect(runAppRecommendations).toHaveBeenCalledWith({
-      config: appliedConfig,
+    const probeBrowserHandoffGateway = vi.fn(async () => ({ ok: true }));
+    const runBrowserHandoff = vi.fn(async () => ({ handedOff: true as const }));
+    const deps = setupDeps({
       prompter,
-      runtime,
-      workspaceDir: "/tmp/work",
-      modelRouteVerified: true,
+      applySetup,
+      runAppRecommendations,
+      probeBrowserHandoffGateway,
+      runBrowserHandoff,
+      platform: "linux",
     });
+
+    await runGuidedOnboarding({ acceptRisk: true, workspace: "/tmp/work" }, makeRuntime(), deps);
+
+    expect(runBrowserHandoff).toHaveBeenCalledWith({ config: {}, prompter });
     expect(applySetup.mock.invocationCallOrder[0]).toBeLessThan(
       runAppRecommendations.mock.invocationCallOrder[0]!,
     );
     expect(runAppRecommendations.mock.invocationCallOrder[0]).toBeLessThan(
-      deps.launchHatchTui.mock.invocationCallOrder[0]!,
+      runBrowserHandoff.mock.invocationCallOrder[0]!,
     );
-    expect(restoreTerminalState.mock.invocationCallOrder[0]).toBeLessThan(
-      deps.launchHatchTui.mock.invocationCallOrder[0]!,
-    );
+    expect(deps.launchHatchTui).not.toHaveBeenCalled();
+    expect(prompter.outro).toHaveBeenCalledWith("Your browser is ready — I'll be in Settings.");
   });
 
-  it("offers memory import after successful inference using the persisted config", async () => {
-    const persistedConfig: OpenClawConfig = {
-      agents: { defaults: { workspace: "/tmp/persisted-workspace" } },
-    };
-    readConfigFileSnapshot
-      .mockResolvedValueOnce({
-        exists: false,
-        valid: true,
-        path: "/tmp/openclaw.json",
-        issues: [],
-        config: {},
-      })
-      .mockResolvedValueOnce({
-        exists: true,
-        valid: true,
-        path: "/tmp/openclaw.json",
-        issues: [],
-        config: persistedConfig,
-      });
+  it("falls through to the terminal hatch when browser handoff does not connect", async () => {
     const prompter = createWizardPrompter();
-    const runSetupMemoryImportStep = vi.fn(
-      async ({ prompter: stepPrompter }: { prompter: WizardPrompter }) => {
-        await stepPrompter.note("Codex — /source/codex (1 memories)", "Memories found");
-      },
-    );
-    const deps = setupDeps({ prompter, runSetupMemoryImportStep });
+    const runBrowserHandoff = vi.fn(async () => ({
+      handedOff: false as const,
+      reason: "timeout" as const,
+    }));
+    const deps = setupDeps({
+      prompter,
+      runBrowserHandoff,
+      probeBrowserHandoffGateway: vi.fn(async () => ({ ok: true })),
+      platform: "darwin",
+    });
 
     await runGuidedOnboarding({ acceptRisk: true, workspace: "/tmp/work" }, makeRuntime(), deps);
 
-    expect(runSetupMemoryImportStep).toHaveBeenCalledWith(
-      expect.objectContaining({ config: persistedConfig, prompter }),
-    );
-    const notes = (prompter.note as ReturnType<typeof vi.fn>).mock.calls;
-    const appliedIndex = notes.findIndex((call) => call[1] === "Inference ready");
-    const memoryIndex = notes.findIndex((call) => call[1] === "Memories found");
-    expect(appliedIndex).toBeGreaterThanOrEqual(0);
-    expect(memoryIndex).toBeGreaterThan(appliedIndex);
-    expect(runSetupMemoryImportStep.mock.invocationCallOrder[0]).toBeLessThan(
-      deps.launchHatchTui.mock.invocationCallOrder[0]!,
-    );
+    expect(runBrowserHandoff).toHaveBeenCalledOnce();
+    expect(deps.launchHatchTui).toHaveBeenCalledWith("/tmp/work");
+    expect(prompter.outro).toHaveBeenCalledWith("Hatching your agent now…");
   });
 
-  it("shows no memory page when the memory step finds no offers", async () => {
+  it("uses --tui to skip browser probing and keep the terminal hatch", async () => {
     const prompter = createWizardPrompter();
-    const runSetupMemoryImportStep = vi.fn(async () => undefined);
-    const deps = setupDeps({ prompter, runSetupMemoryImportStep });
+    const probeBrowserHandoffGateway = vi.fn(async () => ({ ok: true }));
+    const runBrowserHandoff = vi.fn(async () => ({ handedOff: true as const }));
+    const deps = setupDeps({
+      prompter,
+      probeBrowserHandoffGateway,
+      runBrowserHandoff,
+      platform: "darwin",
+    });
+
+    await runGuidedOnboarding(
+      { acceptRisk: true, workspace: "/tmp/work", tui: true },
+      makeRuntime(),
+      deps,
+    );
+
+    expect(probeBrowserHandoffGateway).not.toHaveBeenCalled();
+    expect(runBrowserHandoff).not.toHaveBeenCalled();
+    expect(deps.launchHatchTui).toHaveBeenCalledWith("/tmp/work");
+  });
+
+  it("never attempts browser handoff for remote chat onboarding", async () => {
+    const prompter = createWizardPrompter();
+    const probeBrowserHandoffGateway = vi.fn(async () => ({ ok: true }));
+    const runBrowserHandoff = vi.fn(async () => ({ handedOff: true as const }));
+    const deps = setupDeps({
+      prompter,
+      handoffMode: "chat",
+      probeBrowserHandoffGateway,
+      runBrowserHandoff,
+      platform: "darwin",
+    });
 
     await runGuidedOnboarding({ acceptRisk: true, workspace: "/tmp/work" }, makeRuntime(), deps);
 
-    expect(runSetupMemoryImportStep).toHaveBeenCalledOnce();
-    expect((prompter.note as ReturnType<typeof vi.fn>).mock.calls).not.toContainEqual([
-      expect.anything(),
-      "Memories found",
-    ]);
+    expect(probeBrowserHandoffGateway).not.toHaveBeenCalled();
+    expect(runBrowserHandoff).not.toHaveBeenCalled();
+    expect(deps.runSystemAgentChat).toHaveBeenCalledOnce();
+    expect(deps.launchHatchTui).not.toHaveBeenCalled();
   });
 
   it("persists the one-time risk acknowledgement before inference detection", async () => {
@@ -434,6 +414,8 @@ describe("runGuidedOnboarding", () => {
 
     transportLog.info("after activation");
     expect(consoleLog).toHaveBeenCalledOnce();
+    // The file transport appends asynchronously; drain it before reading.
+    await flushLogger();
     const fileLog = fs.readFileSync(file, "utf8");
     expect(fileLog).toContain("[model-fetch] response status=401");
     expect(fileLog).toContain("after activation");
