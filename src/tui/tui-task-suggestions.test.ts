@@ -1,10 +1,8 @@
 import type { Component, OverlayHandle, SelectItem } from "@earendil-works/pi-tui";
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../../packages/terminal-core/src/ansi.js";
-import {
-  createTuiTaskSuggestionController,
-  parseTuiTaskSuggestion,
-} from "./tui-task-suggestions.js";
+import { createTuiTaskSuggestionController } from "./tui-task-suggestions.js";
 
 type TestSelector = Component & {
   items: SelectItem[];
@@ -55,6 +53,7 @@ function createHarness() {
   });
   const requestRender = vi.fn();
   const listTaskSuggestions = vi.fn().mockResolvedValue([]);
+  const listCloudWorkerProfiles = vi.fn().mockResolvedValue([]);
   const acceptTaskSuggestion = vi
     .fn()
     .mockResolvedValue({ taskId: "task_1", key: "agent:main:task" });
@@ -62,11 +61,12 @@ function createHarness() {
   const onAccepted = vi.fn().mockResolvedValue(undefined);
   let agentId = "main";
   let sessionKey = "agent:main:main";
-  let actionCapabilities = { canAccept: true, canDismiss: true };
+  let actionCapabilities = { canAccept: true, canAcceptModes: true, canDismiss: true };
   const controller = createTuiTaskSuggestionController({
     client: {
       getTaskSuggestionActionCapabilities: () => actionCapabilities,
       listTaskSuggestions,
+      listCloudWorkerProfiles,
       acceptTaskSuggestion,
       dismissTaskSuggestion,
     },
@@ -98,6 +98,7 @@ function createHarness() {
     overlayHandles,
     requestRender,
     listTaskSuggestions,
+    listCloudWorkerProfiles,
     acceptTaskSuggestion,
     dismissTaskSuggestion,
     onAccepted,
@@ -107,16 +108,24 @@ function createHarness() {
     setSessionKey: (value: string) => {
       sessionKey = value;
     },
-    setActionCapabilities: (value: { canAccept: boolean; canDismiss: boolean }) => {
+    setActionCapabilities: (value: {
+      canAccept: boolean;
+      canAcceptModes: boolean;
+      canDismiss: boolean;
+    }) => {
       actionCapabilities = value;
     },
   };
 }
 
 describe("TUI task suggestions", () => {
-  it("parses the Gateway suggestion shape", () => {
-    expect(parseTuiTaskSuggestion(suggestionPayload())).toEqual(suggestionPayload());
-    expect(parseTuiTaskSuggestion({ id: "task_missing_fields" })).toBeNull();
+  it("ignores malformed Gateway suggestion payloads", () => {
+    const harness = createHarness();
+    harness.controller.handleEvent("task.suggestion", {
+      action: "created",
+      suggestion: { id: "task_missing_fields" },
+    });
+    expect(harness.openOverlay).not.toHaveBeenCalled();
   });
 
   it("shows an active-session suggestion and starts it after confirmation", async () => {
@@ -129,19 +138,28 @@ describe("TUI task suggestions", () => {
 
     expect(harness.openOverlay).toHaveBeenCalledTimes(1);
     const prompt = harness.openOverlay.mock.calls[0]?.[0];
-    const renderedPrompt = stripAnsi(prompt.render(80).join("\n"));
+    const renderedPrompt = stripAnsi(
+      expectDefined(prompt, "prompt test invariant").render(80).join("\n"),
+    );
     expect(renderedPrompt).toContain("Suggested follow-up: Remove stale adapter");
     expect(renderedPrompt).toContain("Project: /repo/project");
     expect(renderedPrompt).toContain("Why: The adapter is unreachable");
     expect(renderedPrompt).toContain("Instructions:");
     expect(renderedPrompt).toContain("Delete the stale adapter and update its tests.");
-    expect(harness.selectors[0]?.items.map((item) => item.value)).toEqual(["accept", "dismiss"]);
-    expect(harness.selectors[0]?.setSelectedIndex).toHaveBeenCalledWith(1);
+    expect(harness.selectors[0]?.items.map((item) => item.value)).toEqual([
+      "accept-local",
+      "accept-session",
+      "accept",
+      "dismiss",
+    ]);
+    expect(harness.selectors[0]?.setSelectedIndex).toHaveBeenCalledWith(3);
 
     const accept = { value: "accept", label: "Start in worktree" };
     harness.selectors[0]?.onSelect?.(accept);
     expect(harness.acceptTaskSuggestion).not.toHaveBeenCalled();
-    expect(stripAnsi(prompt.render(80).join("\n"))).toContain("Press Enter again");
+    expect(
+      stripAnsi(expectDefined(prompt, "prompt test invariant").render(80).join("\n")),
+    ).toContain("Press Enter again");
     harness.selectors[0]?.onSelect?.(accept);
 
     await vi.waitFor(() => {
@@ -149,6 +167,57 @@ describe("TUI task suggestions", () => {
       expect(harness.onAccepted).toHaveBeenCalledWith("agent:main:task");
     });
     expect(harness.addSystem).toHaveBeenCalledWith("follow-up task started in agent:main:task");
+  });
+
+  it.each([
+    { value: "accept-local", mode: "local" as const },
+    { value: "accept-session", mode: "session" as const },
+  ])("forwards $mode acceptance after double Enter", async ({ value, mode }) => {
+    const harness = createHarness();
+    harness.controller.handleEvent("task.suggestion", {
+      action: "created",
+      suggestion: suggestionPayload(),
+    });
+    const action = expectDefined(
+      harness.selectors[0]?.items.find((item) => item.value === value),
+      `${mode} action`,
+    );
+
+    harness.selectors[0]?.onSelect?.(action);
+    expect(harness.acceptTaskSuggestion).not.toHaveBeenCalled();
+    harness.selectors[0]?.onSelect?.(action);
+
+    await vi.waitFor(() => {
+      expect(harness.acceptTaskSuggestion).toHaveBeenCalledWith("task_1", mode);
+    });
+    if (mode === "session") {
+      expect(harness.onAccepted).not.toHaveBeenCalled();
+    }
+  });
+
+  it("offers one cloud action per profile and forwards the selected profile", async () => {
+    const harness = createHarness();
+    const suggestion = suggestionPayload();
+    harness.listTaskSuggestions.mockResolvedValueOnce([suggestion]);
+    harness.listCloudWorkerProfiles.mockResolvedValueOnce(["build", "review"]);
+
+    await harness.controller.refresh();
+
+    const cloudActions = harness.selectors[0]?.items.filter(
+      (item) => item.value === "accept-cloud",
+    );
+    expect(cloudActions?.map((item) => item.label)).toEqual([
+      "Send to cloud · build",
+      "Send to cloud · review",
+    ]);
+    const review = expectDefined(cloudActions?.[1], "review cloud action");
+    harness.selectors[0]?.onSelect?.(review);
+    expect(harness.acceptTaskSuggestion).not.toHaveBeenCalled();
+    harness.selectors[0]?.onSelect?.(review);
+
+    await vi.waitFor(() => {
+      expect(harness.acceptTaskSuggestion).toHaveBeenCalledWith("task_1", "cloud", "review");
+    });
   });
 
   it("keeps actions visible while paging through long instructions", () => {
@@ -163,7 +232,9 @@ describe("TUI task suggestions", () => {
     });
 
     const prompt = harness.openOverlay.mock.calls[0]?.[0];
-    const firstPage = stripAnsi(prompt.render(80).join("\n"));
+    const firstPage = stripAnsi(
+      expectDefined(prompt, "prompt test invariant").render(80).join("\n"),
+    );
     expect(firstPage).toContain("instruction-01");
     expect(firstPage).not.toContain("instruction-20");
     expect(firstPage).toContain("PgUp/PgDn to inspect");
@@ -171,8 +242,10 @@ describe("TUI task suggestions", () => {
 
     const pages = [firstPage];
     for (let page = 0; page < 3; page += 1) {
-      prompt.handleInput?.("\u001b[6~");
-      const rendered = stripAnsi(prompt.render(80).join("\n"));
+      expectDefined(prompt, "prompt test invariant").handleInput?.("\u001b[6~");
+      const rendered = stripAnsi(
+        expectDefined(prompt, "prompt test invariant").render(80).join("\n"),
+      );
       pages.push(rendered);
       expect(rendered).toContain("TASK ACTIONS");
     }
@@ -191,10 +264,12 @@ describe("TUI task suggestions", () => {
     const prompt = harness.openOverlay.mock.calls[0]?.[0];
     const pages: string[] = [];
     for (let page = 0; page < 20; page += 1) {
-      const rendered = stripAnsi(prompt.render(24).join("\n"));
+      const rendered = stripAnsi(
+        expectDefined(prompt, "prompt test invariant").render(24).join("\n"),
+      );
       pages.push(rendered);
       expect(rendered).toContain("TASK ACTIONS");
-      prompt.handleInput?.("\u001b[6~");
+      expectDefined(prompt, "prompt test invariant").handleInput?.("\u001b[6~");
     }
     expect(pages.join("\n").replace(/\s/g, "")).toContain("distinguishing-project");
   });
@@ -212,7 +287,9 @@ describe("TUI task suggestions", () => {
     });
 
     const prompt = harness.openOverlay.mock.calls[0]?.[0];
-    const rendered = stripAnsi(prompt.render(80).join("\n"));
+    const rendered = stripAnsi(
+      expectDefined(prompt, "prompt test invariant").render(80).join("\n"),
+    );
     expect(rendered).toContain("safeevil");
     expect(rendered).toContain("/repo/project");
     expect(rendered).toContain("why now");
@@ -238,7 +315,11 @@ describe("TUI task suggestions", () => {
 
   it("offers only actions allowed by the connected operator scopes", () => {
     const writeHarness = createHarness();
-    writeHarness.setActionCapabilities({ canAccept: false, canDismiss: true });
+    writeHarness.setActionCapabilities({
+      canAccept: false,
+      canAcceptModes: true,
+      canDismiss: true,
+    });
     writeHarness.controller.handleEvent("task.suggestion", {
       action: "created",
       suggestion: suggestionPayload(),
@@ -247,12 +328,32 @@ describe("TUI task suggestions", () => {
     expect(writeHarness.selectors[0]?.setSelectedIndex).toHaveBeenCalledWith(0);
 
     const readHarness = createHarness();
-    readHarness.setActionCapabilities({ canAccept: false, canDismiss: false });
+    readHarness.setActionCapabilities({
+      canAccept: false,
+      canAcceptModes: true,
+      canDismiss: false,
+    });
     readHarness.controller.handleEvent("task.suggestion", {
       action: "created",
       suggestion: suggestionPayload(),
     });
     expect(readHarness.openOverlay).not.toHaveBeenCalled();
+  });
+
+  it("offers only worktree acceptance when modes are not advertised", () => {
+    const harness = createHarness();
+    harness.setActionCapabilities({
+      canAccept: true,
+      canAcceptModes: false,
+      canDismiss: true,
+    });
+
+    harness.controller.handleEvent("task.suggestion", {
+      action: "created",
+      suggestion: suggestionPayload(),
+    });
+
+    expect(harness.selectors[0]?.items.map((item) => item.value)).toEqual(["accept", "dismiss"]);
   });
 
   it("rebuilds an active selector when reconnect changes action scopes", async () => {
@@ -264,7 +365,11 @@ describe("TUI task suggestions", () => {
     });
     const staleSelector = harness.selectors[0];
 
-    harness.setActionCapabilities({ canAccept: false, canDismiss: true });
+    harness.setActionCapabilities({
+      canAccept: false,
+      canAcceptModes: true,
+      canDismiss: true,
+    });
     harness.listTaskSuggestions.mockResolvedValueOnce([suggestion]);
     await harness.controller.refresh();
 
@@ -274,6 +379,26 @@ describe("TUI task suggestions", () => {
     staleSelector?.onSelect?.({ value: "accept", label: "Start in worktree" });
     staleSelector?.onSelect?.({ value: "accept", label: "Start in worktree" });
     expect(harness.acceptTaskSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds an active selector when cloud profile identity changes", async () => {
+    const harness = createHarness();
+    const suggestion = suggestionPayload();
+    harness.listTaskSuggestions.mockResolvedValue([suggestion]);
+    harness.listCloudWorkerProfiles.mockResolvedValueOnce(["build"]);
+
+    await harness.controller.refresh();
+    expect(harness.selectors[0]?.items.map((item) => item.label)).toContain(
+      "Send to cloud · build",
+    );
+
+    harness.listCloudWorkerProfiles.mockResolvedValueOnce(["review"]);
+    await harness.controller.refresh();
+
+    expect(harness.closeOverlay).toHaveBeenCalledWith(harness.overlayHandles[0]);
+    expect(harness.selectors[1]?.items.map((item) => item.label)).toContain(
+      "Send to cloud · review",
+    );
   });
 
   it("shows a still-pending suggestion again when its action fails", async () => {
@@ -331,6 +456,87 @@ describe("TUI task suggestions", () => {
 
     expect(harness.openOverlay).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    {
+      label: "shows a fixed-store alias owned by the active agent",
+      selectedAgent: "main",
+      selectedSession: "agent:main:support",
+      suggestionAgent: "main",
+      suggestionSession: "support",
+      visible: true,
+    },
+    {
+      label: "rejects a fixed-store alias owned by another agent",
+      selectedAgent: "main",
+      selectedSession: "agent:main:support",
+      suggestionAgent: "work",
+      suggestionSession: "support",
+      visible: false,
+    },
+    {
+      label: "rejects a fixed-store alias without explicit owner evidence",
+      selectedAgent: "main",
+      selectedSession: "agent:main:support",
+      suggestionAgent: undefined,
+      suggestionSession: "support",
+      visible: false,
+    },
+    {
+      label: "rejects a matching canonical key with a contradictory explicit owner",
+      selectedAgent: "main",
+      selectedSession: "agent:main:support",
+      suggestionAgent: "work",
+      suggestionSession: "agent:main:support",
+      visible: false,
+    },
+    {
+      label: "accepts a canonical key whose parsed owner identifies the active agent",
+      selectedAgent: "main",
+      selectedSession: "agent:main:support",
+      suggestionAgent: undefined,
+      suggestionSession: "agent:main:support",
+      visible: true,
+    },
+    {
+      label: "rejects a foreign canonical key against a bare selected alias",
+      selectedAgent: "main",
+      selectedSession: "support",
+      suggestionAgent: "main",
+      suggestionSession: "agent:work:support",
+      visible: false,
+    },
+    {
+      label: "rejects a global suggestion without explicit owner evidence",
+      selectedAgent: "main",
+      selectedSession: "global",
+      suggestionAgent: undefined,
+      suggestionSession: "global",
+      visible: false,
+    },
+    {
+      label: "preserves case-sensitive opaque session references",
+      selectedAgent: "main",
+      selectedSession: "agent:main:matrix:group:!Room:example.org",
+      suggestionAgent: "main",
+      suggestionSession: "matrix:group:!room:example.org",
+      visible: false,
+    },
+  ])(
+    "$label",
+    ({ selectedAgent, selectedSession, suggestionAgent, suggestionSession, visible }) => {
+      const harness = createHarness();
+      harness.setAgentId(selectedAgent);
+      harness.setSessionKey(selectedSession);
+
+      harness.controller.handleEvent("task.suggestion", {
+        action: "created",
+        suggestion: suggestionPayload({ agentId: suggestionAgent, sessionKey: suggestionSession }),
+      });
+
+      expect(harness.openOverlay).toHaveBeenCalledTimes(visible ? 1 : 0);
+    },
+  );
 
   it("closes a suggestion resolved by another client", () => {
     const harness = createHarness();

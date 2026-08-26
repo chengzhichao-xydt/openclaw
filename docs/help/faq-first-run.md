@@ -57,12 +57,10 @@ and troubleshooting see the main [FAQ](/help/faq).
     | Skip reason | Meaning |
     | --- | --- |
     | `quiet-hours` | Outside the configured active-hours window |
-    | `empty-heartbeat-file` | `HEARTBEAT.md` exists but only has blank, comment, header, fence, or empty-checklist scaffolding |
-    | `no-tasks-due` | Task mode is active but no task interval is due yet |
+    | `empty-heartbeat-file` | Heartbeat monitor scratch exists but only has blank, comment, header, fence, or empty-checklist scaffolding |
     | `alerts-disabled` | All heartbeat visibility is off (`showOk`, `showAlerts`, and `useIndicator` all disabled) |
 
-    In task mode, due timestamps advance only after a real heartbeat run completes.
-    Skipped runs do not mark tasks as completed.
+    Older heartbeat `tasks:` blocks migrate to independently scheduled cron jobs with `openclaw doctor --fix`.
 
     Docs: [Heartbeat](/gateway/heartbeat), [Automation](/automation).
 
@@ -109,7 +107,6 @@ and troubleshooting see the main [FAQ](/help/faq).
 
     - **Tailscale Serve** (recommended): keep bind loopback, run `openclaw gateway --tailscale serve`, open `https://<magicdns>/`. With `gateway.auth.allowTailscale: true`, identity headers satisfy Control UI/WebSocket auth (no pasted shared secret, assumes a trusted gateway host); HTTP APIs still need shared-secret auth unless you deliberately use private-ingress `none` or trusted-proxy HTTP auth.
       Concurrent bad-auth Serve attempts from the same client are serialized before the failed-auth limiter records them, so a second bad retry can already show `retry later`.
-    - **Tailnet bind**: run `openclaw gateway --bind tailnet --token "<token>"` (or configure password auth), open `http://<tailscale-ip>:18789/`, paste the matching shared secret in dashboard settings.
     - **Identity-aware reverse proxy**: keep the Gateway behind a trusted proxy, set `gateway.auth.mode: "trusted-proxy"`, open the proxy URL. Same-host loopback proxies need explicit `gateway.auth.trustedProxy.allowLoopback: true`.
     - **SSH tunnel**: `ssh -N -L 18789:127.0.0.1:18789 user@gateway-host`, then open `http://127.0.0.1:18789/`. Shared-secret auth still applies over the tunnel; paste the configured token or password if prompted.
 
@@ -141,8 +138,8 @@ and troubleshooting see the main [FAQ](/help/faq).
   </Accordion>
 
   <Accordion title="What runtime do I need?">
-    Node **22.19+** is required (Node 24 recommended). `pnpm` is the repo package manager.
-    Bun is **not recommended** for the Gateway.
+    Node **22.22.3+**, **24.15+**, or **25.9+** is the primary and default runtime (Node 26 recommended). `pnpm` is the repo package manager.
+    Bun 1.4+ builds with WAL-reset-safe `node:sqlite` can run the CLI, Gateway, and managed node host as an explicit opt-in.
   </Accordion>
 
   <Accordion title="Does it run on Raspberry Pi?">
@@ -161,7 +158,8 @@ and troubleshooting see the main [FAQ](/help/faq).
     the Gateway (models call out to cloud APIs), even a modest Pi handles the load.
 
     A small Pi/VPS can also host just the Gateway while you pair **nodes** on your
-    laptop/phone for local screen/camera/canvas or command execution. See [Nodes](/nodes).
+    laptop/phone for local screen/camera or command execution. A paired Mac can
+    also present hosted widgets in its native panel. See [Nodes](/nodes).
 
     Full setup walkthrough: [Raspberry Pi](/install/raspberry-pi).
 
@@ -225,7 +223,7 @@ and troubleshooting see the main [FAQ](/help/faq).
 
     **Important:** if you only commit/push your workspace to GitHub, you back up
     **memory + bootstrap files**, but not session history or auth. Those live under
-    `~/.openclaw/` (for example `~/.openclaw/agents/<agentId>/sessions/`).
+    `~/.openclaw/` (for example `~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite`).
 
     Related: [Migrating](/install/migrating), [Where things live on disk](/help/faq#where-things-live-on-disk),
     [Agent workspace](/concepts/agent-workspace), [Doctor](/gateway/doctor),
@@ -434,7 +432,7 @@ and troubleshooting see the main [FAQ](/help/faq).
     treat the host as the source of truth and back it up.
 
     Pair **nodes** (Mac/iOS/Android/headless) to that cloud Gateway for local
-    screen/camera/canvas or command execution on your laptop while the Gateway stays in
+    screen/camera or command execution on your laptop while the Gateway stays in
     the cloud.
 
     Hub: [Platforms](/platforms). Remote access: [Gateway remote](/gateway/remote).
@@ -473,9 +471,10 @@ and troubleshooting see the main [FAQ](/help/faq).
     2. **Workspace** - location + bootstrap files.
     3. **Gateway** - port, bind address, auth mode, Tailscale exposure.
     4. **Channels** - built-in and official plugin chat channels: iMessage, Discord, Feishu, Google Chat, Mattermost, Microsoft Teams, QQ Bot, Signal, Slack, Telegram, WhatsApp, and more.
-    5. **Daemon** - LaunchAgent (macOS), systemd user unit (Linux/WSL2), or native Windows Scheduled Task.
-    6. **Health check** - starts the Gateway and verifies it is running.
-    7. **Skills** - installs recommended skills and optional dependencies.
+    5. **Web search** - configures an optional search provider.
+    6. **Skills** - installs recommended skills and optional dependencies.
+    7. **Daemon** - LaunchAgent (macOS), systemd user unit (Linux/WSL2), or native Windows Scheduled Task.
+    8. **Health check** - starts the Gateway and verifies it is running.
 
     It sets duration expectations up front and warns if your configured model is unknown
     or missing auth. Full breakdown: [Onboarding (CLI)](/start/wizard).
@@ -558,12 +557,17 @@ and troubleshooting see the main [FAQ](/help/faq).
   </Accordion>
 
   <Accordion title="How does Codex auth work?">
-    OpenClaw supports **OpenAI Codex** via OAuth (ChatGPT sign-in). Use `openai/gpt-5.5`
-    for the default setup: ChatGPT/Codex subscription auth plus native Codex app-server
-    execution. Legacy Codex-prefixed model refs are legacy config repaired by
-    `openclaw doctor --fix`. Direct OpenAI API-key access remains available for non-agent
-    OpenAI API surfaces and, through an ordered `openai` API-key profile, for agent models
-    too. See [Model providers](/concepts/model-providers) and [Onboarding (CLI)](/start/wizard).
+    OpenClaw supports **OpenAI Codex** via OAuth (ChatGPT sign-in). A fresh
+    setup with no primary model uses exact `openai/gpt-5.6-sol` for
+    ChatGPT/Codex subscription auth plus native Codex app-server execution.
+    Reauthentication preserves an existing explicit model, including
+    `openai/gpt-5.5`. If the Codex workspace does not expose GPT-5.6, select
+    `openai/gpt-5.5` explicitly; OpenClaw does not silently downgrade. Legacy
+    Codex-prefixed model refs are legacy config repaired by `openclaw doctor
+    --fix`. Direct OpenAI API-key access remains available for non-agent OpenAI
+    API surfaces and, through an ordered `openai` API-key profile, for agent
+    models too. See [Model providers](/concepts/model-providers) and
+    [Onboarding (CLI)](/start/wizard).
   </Accordion>
 
   <Accordion title="Why does OpenClaw still mention legacy OpenAI Codex prefix?">
@@ -571,14 +575,17 @@ and troubleshooting see the main [FAQ](/help/faq).
     ChatGPT/Codex OAuth - OpenAI Codex is folded into it. You may still see a legacy
     `openai-codex` prefix in older config and migration warnings:
 
-    - `openai/gpt-5.5` = ChatGPT/Codex subscription auth with native Codex runtime for agent turns.
+    - `openai/gpt-5.6-sol` = fresh ChatGPT/Codex subscription setup with the native Codex runtime for agent turns.
+    - `openai/gpt-5.5` = explicit supported selection for existing config or accounts without GPT-5.6 access.
     - Legacy `openai-codex/*` model refs = legacy route repaired by `openclaw doctor --fix`.
     - `openai/gpt-5.5` plus an ordered `openai` API-key profile = API-key auth for an OpenAI agent model.
     - Legacy `openai-codex` auth profile ids = legacy ids migrated by `openclaw doctor --fix`.
 
     Want direct OpenAI Platform billing? Set `OPENAI_API_KEY`. Want ChatGPT/Codex
-    subscription auth? Run `openclaw models auth login --provider openai`. Keep the model
-    ref as `openai/gpt-5.5`; legacy Codex-prefixed refs are what `openclaw doctor --fix` rewrites.
+    subscription auth? Run `openclaw models auth login --provider openai`. Keep
+    model refs under the canonical `openai/*` provider. Fresh subscription
+    setup uses exact `openai/gpt-5.6-sol`; doctor repairs legacy Codex-prefixed
+    refs without upgrading an explicit `openai/gpt-5.5` selection.
 
   </Accordion>
 
@@ -600,18 +607,16 @@ and troubleshooting see the main [FAQ](/help/faq).
 
   </Accordion>
 
-  <Accordion title="How do I set up Gemini CLI OAuth?">
-    Gemini CLI uses a **plugin auth flow**, not a client id or secret in `openclaw.json`.
+  <Accordion title="Can I use Gemini CLI or Antigravity OAuth?">
+    OpenClaw does not offer new Gemini CLI OAuth or Antigravity OAuth setup.
+    Connect Google with an AI Studio API key or Vertex AI instead.
 
-    1. Install Gemini CLI locally so `gemini` is on `PATH`:
-       - Homebrew: `brew install gemini-cli`
-       - npm: `npm install -g @google/gemini-cli`
-    2. Enable the plugin: `openclaw plugins enable google`
-    3. Login: `openclaw models auth login --provider google-gemini-cli --set-default`
-    4. Default model after login: `google/gemini-3.1-pro-preview` (runtime `google-gemini-cli`)
-    5. Requests failing after login? Set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` on the gateway host and retry.
+    The optional `google-gemini-cli` runtime remains available for advanced
+    setups using a supported Google API-key profile. Existing valid legacy
+    Gemini CLI OAuth profiles remain executable for compatibility, but OpenClaw
+    cannot create or repair them.
 
-    OAuth tokens are stored in auth profiles on the gateway host. Details: [Google](/providers/google), [Model providers](/concepts/model-providers).
+    Details: [Google](/providers/google), [Model providers](/concepts/model-providers).
 
   </Accordion>
 
@@ -659,7 +664,8 @@ and troubleshooting see the main [FAQ](/help/faq).
   <Accordion title="If I buy a Mac mini to run OpenClaw, can I connect it to my MacBook Pro?">
     Yes. The **Mac mini can run the Gateway**, and your MacBook Pro connects as a **node**
     (companion device). Nodes do not run the Gateway - they add capabilities like
-    screen/camera/canvas and `system.run` on that device.
+    screen/camera and `system.run` on that device. A Mac node can also present
+    hosted widgets in its native panel.
 
     Common pattern: Gateway on the always-on Mac mini; MacBook Pro runs the macOS app or a
     node host and pairs to the Gateway. Check with `openclaw nodes status` / `openclaw nodes list`.
@@ -669,9 +675,10 @@ and troubleshooting see the main [FAQ](/help/faq).
   </Accordion>
 
   <Accordion title="Can I use Bun?">
-    Not recommended - Bun has runtime bugs, especially with WhatsApp and Telegram. Use
-    **Node** for stable gateways. If you still want to experiment, do it on a
-    non-production gateway without WhatsApp/Telegram.
+    Yes. Node remains the primary, default, and recommended runtime, but Bun 1.4+
+    with WAL-reset-safe `node:sqlite` can run the CLI, Gateway, and managed node
+    host as an explicit opt-in. Bun can also run package scripts; use
+    `pnpm install` for dependency installation.
   </Accordion>
 
   <Accordion title="Telegram: what goes in allowFrom?">

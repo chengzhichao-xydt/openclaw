@@ -4,15 +4,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { expectDefined } from "@openclaw/normalization-core";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   buildGroupedTestComparison,
   buildGroupedTestReport,
   renderGroupedTestComparison,
   resolveGroupKey,
   resolveTestArea,
-} from "../../scripts/lib/test-group-report.mjs";
-import { resolveWindowsTaskkillPath } from "../../scripts/lib/windows-taskkill.mjs";
+} from "../../scripts/lib/test-group-report.mts";
 import {
   parseTestGroupReportArgs,
   resolveFullSuiteVitestEnv,
@@ -22,14 +22,17 @@ import {
   resolveRunPlanConcurrency,
   resolveRunPlans,
   runReportPlans,
-  signalTestGroupReportChild,
   spawnText,
-} from "../../scripts/test-group-report.mjs";
+} from "../../scripts/test-group-report.mts";
 import { withEnv } from "../../src/test-utils/env.js";
+import { cleanupTempDirs, makeTempDir } from "../helpers/temp-dir.js";
 
-function makeTempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-test-group-report-"));
-}
+const tempDirs = new Set<string>();
+const tsxImport = import.meta.resolve("tsx");
+
+afterAll(() => {
+  cleanupTempDirs(tempDirs);
+});
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -52,7 +55,7 @@ async function waitForFile(filePath: string, timeoutMs: number): Promise<void> {
     if (fs.existsSync(filePath)) {
       return;
     }
-    await sleep(25);
+    await sleep(5);
   }
   throw new Error(`timed out waiting for ${filePath}`);
 }
@@ -63,13 +66,9 @@ async function waitForDead(pid: number, timeoutMs: number): Promise<void> {
     if (!isProcessAlive(pid)) {
       return;
     }
-    await sleep(25);
+    await sleep(5);
   }
   throw new Error(`timed out waiting for pid ${pid} to exit`);
-}
-
-function expectedTaskkillPath(): string {
-  return resolveWindowsTaskkillPath();
 }
 
 function waitForChildClose(
@@ -203,13 +202,21 @@ describe("scripts/test-group-report aggregation", () => {
   });
 
   it("fails missing report inputs instead of writing an empty green report", () => {
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const missingReport = path.join(tempDir, "missing.json");
     const output = path.join(tempDir, "group-report.json");
     try {
       const result = spawnSync(
         process.execPath,
-        ["scripts/test-group-report.mjs", "--report", missingReport, "--output", output],
+        [
+          "--import",
+          tsxImport,
+          "scripts/test-group-report.mts",
+          "--report",
+          missingReport,
+          "--output",
+          output,
+        ],
         {
           cwd: process.cwd(),
           encoding: "utf8",
@@ -228,14 +235,22 @@ describe("scripts/test-group-report aggregation", () => {
     ["missing testResults array", {}],
     ["empty testResults array", { testResults: [] }],
   ])("fails malformed report inputs with %s", (reason, payload) => {
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const reportPath = path.join(tempDir, "malformed.json");
     const output = path.join(tempDir, "group-report.json");
     fs.writeFileSync(reportPath, `${JSON.stringify(payload)}\n`, "utf8");
     try {
       const result = spawnSync(
         process.execPath,
-        ["scripts/test-group-report.mjs", "--report", reportPath, "--output", output],
+        [
+          "--import",
+          tsxImport,
+          "scripts/test-group-report.mts",
+          "--report",
+          reportPath,
+          "--output",
+          output,
+        ],
         {
           cwd: process.cwd(),
           encoding: "utf8",
@@ -252,14 +267,16 @@ describe("scripts/test-group-report aggregation", () => {
   });
 
   it("fails when every allow-failures run produces no JSON report", () => {
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const missingConfig = path.join(tempDir, "missing-vitest.config.ts");
     const output = path.join(tempDir, "group-report.json");
     try {
       const result = spawnSync(
         process.execPath,
         [
-          "scripts/test-group-report.mjs",
+          "--import",
+          tsxImport,
+          "scripts/test-group-report.mts",
           "--config",
           missingConfig,
           "--allow-failures",
@@ -284,7 +301,7 @@ describe("scripts/test-group-report aggregation", () => {
   });
 
   it("continues allow-failures profiling after a config exits without JSON", async () => {
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const reportDir = path.join(tempDir, "reports");
     const calls: string[] = [];
     try {
@@ -344,7 +361,7 @@ describe("scripts/test-group-report aggregation", () => {
   });
 
   it("continues allow-failures profiling after a config writes an empty JSON report", async () => {
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     try {
       const result = await runReportPlans({
         args: parseTestGroupReportArgs([
@@ -399,8 +416,69 @@ describe("scripts/test-group-report aggregation", () => {
     }
   });
 
+  it("stops admitting report plans after a parallel failure", async () => {
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
+    const labels = ["first", "second", "third"];
+    const started: string[] = [];
+    const resolvers = new Map<string, (status: number) => void>();
+    try {
+      const runPromise = runReportPlans({
+        args: parseTestGroupReportArgs([
+          ...labels.flatMap((label) => ["--config", `${label}.config.ts`]),
+          "--concurrency",
+          "2",
+          "--no-rss",
+        ]),
+        logDir: path.join(tempDir, "logs"),
+        reportDir: path.join(tempDir, "reports"),
+        runPlans: labels.map((label) => ({
+          config: `${label}.config.ts`,
+          forwardedArgs: [],
+          label,
+        })),
+        runVitestJsonReport: async (params: {
+          config: string;
+          label: string;
+          logPath: string;
+          reportPath: string;
+        }) => {
+          started.push(params.label);
+          const status = await new Promise<number>((resolve) => {
+            resolvers.set(params.label, resolve);
+          });
+          return {
+            config: params.config,
+            elapsedMs: 10,
+            label: params.label,
+            logPath: params.logPath,
+            maxRssBytes: null,
+            reportPath: params.reportPath,
+            status,
+          };
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(started).toStrictEqual(["first", "second"]);
+      });
+      resolvers.get("first")?.(1);
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(started).toStrictEqual(["first", "second"]);
+      resolvers.get("second")?.(0);
+
+      const result = await runPromise;
+      expect(result.exitCode).toBe(1);
+      expect(result.failed).toBe(true);
+      expect(result.runs.map((run) => run.label)).toStrictEqual(["first", "second"]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("prints slow tests as soon as each config report completes", async () => {
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       await runReportPlans({
@@ -601,7 +679,7 @@ describe("scripts/test-group-report comparison", () => {
   });
 
   it("fails compare mode for malformed grouped reports", () => {
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const beforePath = path.join(tempDir, "before.json");
     const afterPath = path.join(tempDir, "after.json");
     const output = path.join(tempDir, "compare.json");
@@ -610,7 +688,16 @@ describe("scripts/test-group-report comparison", () => {
     try {
       const result = spawnSync(
         process.execPath,
-        ["scripts/test-group-report.mjs", "--compare", beforePath, afterPath, "--output", output],
+        [
+          "--import",
+          tsxImport,
+          "scripts/test-group-report.mts",
+          "--compare",
+          beforePath,
+          afterPath,
+          "--output",
+          output,
+        ],
         {
           cwd: process.cwd(),
           encoding: "utf8",
@@ -627,7 +714,7 @@ describe("scripts/test-group-report comparison", () => {
   });
 
   it("fails compare mode for empty grouped report evidence", () => {
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const beforePath = path.join(tempDir, "before.json");
     const afterPath = path.join(tempDir, "after.json");
     const output = path.join(tempDir, "compare.json");
@@ -646,7 +733,16 @@ describe("scripts/test-group-report comparison", () => {
     try {
       const result = spawnSync(
         process.execPath,
-        ["scripts/test-group-report.mjs", "--compare", beforePath, afterPath, "--output", output],
+        [
+          "--import",
+          tsxImport,
+          "scripts/test-group-report.mts",
+          "--compare",
+          beforePath,
+          afterPath,
+          "--output",
+          output,
+        ],
         {
           cwd: process.cwd(),
           encoding: "utf8",
@@ -803,11 +899,23 @@ describe("scripts/test-group-report arg parsing", () => {
       ["--timeout-ms", ["1000", "2000"]],
       ["--kill-grace-ms", ["100", "200"]],
       ["--concurrency", ["2", "3"]],
-    ]) {
+    ] as const) {
       const args =
         flag === "--compare"
-          ? [flag, values[0], values[1], flag, values[2], values[3]]
-          : [flag, values[0], flag, values[1]];
+          ? [
+              flag,
+              expectDefined(values[0], "first compare report path"),
+              expectDefined(values[1], "first compare baseline path"),
+              flag,
+              expectDefined(values[2], "second compare report path"),
+              expectDefined(values[3], "second compare baseline path"),
+            ]
+          : [
+              flag,
+              expectDefined(values[0], `first ${flag} value`),
+              flag,
+              expectDefined(values[1], `second ${flag} value`),
+            ];
       expect(() => parseTestGroupReportArgs(args)).toThrow(`${flag} was provided more than once`);
     }
     expect(parseTestGroupReportArgs(["--config", "a.ts", "--config", "b.ts"]).configs).toEqual([
@@ -822,75 +930,6 @@ describe("scripts/test-group-report arg parsing", () => {
 });
 
 describe("scripts/test-group-report child process guard", () => {
-  it("signals Windows child process trees with taskkill", () => {
-    const child = {
-      kill: vi.fn(),
-      pid: 12345,
-    };
-    const runTaskkill = vi.fn(() => ({ error: undefined, status: 0 }));
-
-    signalTestGroupReportChild(child, "SIGTERM", {
-      platform: "win32",
-      runTaskkill,
-    });
-    expect(runTaskkill).toHaveBeenNthCalledWith(
-      1,
-      expectedTaskkillPath(),
-      ["/PID", "12345", "/T"],
-      {
-        stdio: "ignore",
-      },
-    );
-
-    signalTestGroupReportChild(child, "SIGKILL", {
-      platform: "win32",
-      runTaskkill,
-    });
-    expect(runTaskkill).toHaveBeenNthCalledWith(
-      2,
-      expectedTaskkillPath(),
-      ["/PID", "12345", "/T", "/F"],
-      {
-        stdio: "ignore",
-      },
-    );
-    expect(child.kill).not.toHaveBeenCalled();
-  });
-
-  it("force-kills Windows child process trees when graceful taskkill fails", () => {
-    const child = {
-      kill: vi.fn(),
-      pid: 12345,
-    };
-    const runTaskkill = vi
-      .fn()
-      .mockReturnValueOnce({ error: undefined, status: 1 })
-      .mockReturnValueOnce({ error: undefined, status: 0 });
-
-    signalTestGroupReportChild(child, "SIGTERM", {
-      platform: "win32",
-      runTaskkill,
-    });
-
-    expect(runTaskkill).toHaveBeenNthCalledWith(
-      1,
-      expectedTaskkillPath(),
-      ["/PID", "12345", "/T"],
-      {
-        stdio: "ignore",
-      },
-    );
-    expect(runTaskkill).toHaveBeenNthCalledWith(
-      2,
-      expectedTaskkillPath(),
-      ["/PID", "12345", "/T", "/F"],
-      {
-        stdio: "ignore",
-      },
-    );
-    expect(child.kill).not.toHaveBeenCalled();
-  });
-
   it.concurrent("times out a child that ignores SIGTERM", async () => {
     if (process.platform === "win32") {
       return;
@@ -907,7 +946,7 @@ describe("scripts/test-group-report child process guard", () => {
       {
         cwd: process.cwd(),
         env: process.env,
-        killGraceMs: 50,
+        killGraceMs: 25,
         timeoutMs: 250,
       },
     );
@@ -939,13 +978,13 @@ describe("scripts/test-group-report child process guard", () => {
           [
             "import fs from 'node:fs';",
             "process.on('SIGTERM', () => {});",
-            `setInterval(() => fs.appendFileSync(${JSON.stringify(markerPath)}, "x"), 20);`,
+            `setInterval(() => fs.appendFileSync(${JSON.stringify(markerPath)}, "x"), 5);`,
           ].join("\n"),
         ],
         {
           cwd: process.cwd(),
           env: process.env,
-          killGraceMs: 50,
+          killGraceMs: 25,
           timeoutMs: 250,
         },
       );
@@ -959,7 +998,7 @@ describe("scripts/test-group-report child process guard", () => {
 
       const sizeAfterReturn = fs.existsSync(markerPath) ? fs.statSync(markerPath).size : 0;
       await new Promise((resolve) => {
-        setTimeout(resolve, 150);
+        setTimeout(resolve, 40);
       });
       const sizeAfterWait = fs.existsSync(markerPath) ? fs.statSync(markerPath).size : 0;
       expect(sizeAfterWait).toBe(sizeAfterReturn);
@@ -973,9 +1012,9 @@ describe("scripts/test-group-report child process guard", () => {
       return;
     }
 
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const childPidPath = path.join(tempDir, "child.pid");
-    const reportModuleUrl = pathToFileURL(path.resolve("scripts/test-group-report.mjs")).href;
+    const reportModuleUrl = pathToFileURL(path.resolve("scripts/test-group-report.mts")).href;
     let childPid: number | undefined;
     try {
       const childScript = [
@@ -990,15 +1029,19 @@ describe("scripts/test-group-report child process guard", () => {
         "const result = await spawnText(",
         '  "/usr/bin/time",',
         `  [process.execPath, "--eval", ${JSON.stringify(childScript)}],`,
-        "  { cwd: process.cwd(), env: process.env, killGraceMs: 50, timeoutMs: 500 },",
+        "  { cwd: process.cwd(), env: process.env, killGraceMs: 25, timeoutMs: 500 },",
         ");",
         "process.stdout.write(JSON.stringify(result));",
       ].join("\n");
-      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", runnerScript], {
-        cwd: process.cwd(),
-        encoding: "utf8",
-        timeout: 5_000,
-      });
+      const result = spawnSync(
+        process.execPath,
+        ["--import", tsxImport, "--input-type=module", "--eval", runnerScript],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          timeout: 5_000,
+        },
+      );
       if (fs.existsSync(childPidPath)) {
         childPid = Number.parseInt(fs.readFileSync(childPidPath, "utf8"), 10);
       }
@@ -1024,17 +1067,21 @@ describe("scripts/test-group-report child process guard", () => {
       return;
     }
 
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const childPidPath = path.join(tempDir, "child.pid");
     const readyPath = path.join(tempDir, "child.ready");
-    const reportModuleUrl = pathToFileURL(path.resolve("scripts/test-group-report.mjs")).href;
+    const reportModuleUrl = pathToFileURL(path.resolve("scripts/test-group-report.mts")).href;
     let childPid: number | undefined;
     let runner: ReturnType<typeof spawn> | undefined;
     try {
+      // Publish the pid via rename so it appears atomically: waitForFile polls
+      // existence only, and a direct writeFileSync leaves an empty-file window
+      // that made the pid parse as NaN (isProcessAlive false) on loaded CI.
       const childScript = [
         "const fs = require('node:fs');",
         "process.on('SIGTERM', () => {});",
-        `fs.writeFileSync(${JSON.stringify(childPidPath)}, String(process.pid));`,
+        `fs.writeFileSync(${JSON.stringify(`${childPidPath}.tmp`)}, String(process.pid));`,
+        `fs.renameSync(${JSON.stringify(`${childPidPath}.tmp`)}, ${JSON.stringify(childPidPath)});`,
         "setInterval(() => {}, 1000);",
       ].join("\n");
       const parentScript = [
@@ -1053,12 +1100,18 @@ describe("scripts/test-group-report child process guard", () => {
         ");",
       ].join("\n");
 
-      runner = spawn(process.execPath, ["--input-type=module", "--eval", runnerScript], {
-        cwd: process.cwd(),
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      await waitForFile(readyPath, 2_000);
-      await waitForFile(childPidPath, 2_000);
+      runner = spawn(
+        process.execPath,
+        ["--import", tsxImport, "--input-type=module", "--eval", runnerScript],
+        {
+          cwd: process.cwd(),
+          stdio: ["ignore", "ignore", "pipe"],
+        },
+      );
+      // Generous poll deadlines: spawning the nested runner/parent/child node
+      // chain can take multiple seconds on loaded CI runners.
+      await waitForFile(readyPath, 10_000);
+      await waitForFile(childPidPath, 10_000);
       childPid = Number.parseInt(fs.readFileSync(childPidPath, "utf8"), 10);
       expect(isProcessAlive(childPid)).toBe(true);
 
@@ -1068,7 +1121,7 @@ describe("scripts/test-group-report child process guard", () => {
         code: null,
         signal: "SIGTERM",
       });
-      await waitForDead(childPid, 2_000);
+      await waitForDead(childPid, 10_000);
     } finally {
       if (runner?.pid && isProcessAlive(runner.pid)) {
         runner.kill("SIGKILL");
@@ -1085,7 +1138,7 @@ describe("scripts/test-group-report child process guard", () => {
       return;
     }
 
-    const tempDir = makeTempDir();
+    const tempDir = makeTempDir(tempDirs, "openclaw-test-group-report-");
     const childPidPath = path.join(tempDir, "child.pid");
     const readyPath = path.join(tempDir, "child.ready");
     const cleanupPath = path.join(tempDir, "child.cleanup");

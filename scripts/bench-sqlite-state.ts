@@ -2,8 +2,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { expectDefined } from "../packages/normalization-core/src/expect.js";
 import {
   openOpenClawAgentDatabase,
   closeOpenClawAgentDatabasesForTest,
@@ -13,15 +14,18 @@ import {
   openOpenClawStateDatabase,
 } from "../src/state/openclaw-state-db.js";
 import { parseStrictIntegerOption } from "./lib/dev-tooling-safety.ts";
-
-type ProfileId = "smoke" | "default" | "large";
+import {
+  CliUsageError,
+  parseSqliteStateBenchmarkCli,
+  type ProfileId,
+} from "./lib/sqlite-state-benchmark-cli.js";
 
 type ProfileConfig = {
   agentCacheEntries: number;
   agentCount: number;
   channelIngressEvents: number;
   cronJobs: number;
-  cronRunLogs: number;
+  cronTaskRuns: number;
   deliveryQueueEntries: number;
   pluginStateEntries: number;
   queryRuns: number;
@@ -53,10 +57,11 @@ type BenchmarkReport = {
     agentDatabases: number;
     channelIngressEvents: number;
     cronJobs: number;
-    cronRunLogs: number;
+    cronTaskRuns: number;
     deliveryQueueEntries: number;
     pluginStateEntries: number;
     stateRows: number;
+    transcriptEvents: number;
   };
   timingsMs: {
     checkpoint: number;
@@ -77,7 +82,7 @@ const PROFILES: Record<ProfileId, ProfileConfig> = {
     agentCount: 2,
     channelIngressEvents: 1_000,
     cronJobs: 100,
-    cronRunLogs: 1_000,
+    cronTaskRuns: 1_000,
     deliveryQueueEntries: 1_000,
     pluginStateEntries: 1_000,
     queryRuns: 12,
@@ -87,7 +92,7 @@ const PROFILES: Record<ProfileId, ProfileConfig> = {
     agentCount: 5,
     channelIngressEvents: 10_000,
     cronJobs: 1_000,
-    cronRunLogs: 50_000,
+    cronTaskRuns: 50_000,
     deliveryQueueEntries: 50_000,
     pluginStateEntries: 20_000,
     queryRuns: 30,
@@ -97,85 +102,15 @@ const PROFILES: Record<ProfileId, ProfileConfig> = {
     agentCount: 10,
     channelIngressEvents: 100_000,
     cronJobs: 5_000,
-    cronRunLogs: 250_000,
+    cronTaskRuns: 250_000,
     deliveryQueueEntries: 200_000,
     pluginStateEntries: 100_000,
     queryRuns: 40,
   },
 };
 
-type CliOptions = {
-  output: string | null;
-  profile: ProfileId;
-  stateDir: string | null;
-};
-
-const BOOLEAN_FLAGS = new Set(["--help"]);
-const VALUE_FLAGS = new Set(["--output", "--profile", "--state-dir"]);
-
-class CliUsageError extends Error {
-  override name = "CliUsageError";
-}
-
-function parseFlagValue(flag: string, argv: string[]): string | undefined {
-  const index = argv.indexOf(flag);
-  if (index === -1) {
-    return undefined;
-  }
-  const value = argv[index + 1];
-  if (!value || value.startsWith("-")) {
-    throw new CliUsageError(`${flag} requires a value`);
-  }
-  return value;
-}
-
-function hasFlag(flag: string, argv = process.argv.slice(2)): boolean {
-  return argv.includes(flag);
-}
-
-function validateArgs(argv: string[]): void {
-  const seenValueFlags = new Set<string>();
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index] ?? "";
-    if (BOOLEAN_FLAGS.has(arg)) {
-      continue;
-    }
-    if (VALUE_FLAGS.has(arg)) {
-      if (seenValueFlags.has(arg)) {
-        throw new CliUsageError(`${arg} was provided more than once`);
-      }
-      seenValueFlags.add(arg);
-      const value = argv[index + 1];
-      if (!value || value.startsWith("-")) {
-        throw new CliUsageError(`${arg} requires a value`);
-      }
-      index += 1;
-      continue;
-    }
-    throw new CliUsageError(`Unknown argument: ${arg}`);
-  }
-}
-
-function parseProfile(raw: string | undefined): ProfileId {
-  if (!raw) {
-    return "default";
-  }
-  if (raw === "smoke" || raw === "default" || raw === "large") {
-    return raw;
-  }
-  throw new CliUsageError(
-    `--profile must be one of smoke, default, large; got ${JSON.stringify(raw)}`,
-  );
-}
-
-function parseOptions(argv = process.argv.slice(2)): CliOptions {
-  validateArgs(argv);
-  return {
-    output: parseFlagValue("--output", argv) ?? null,
-    profile: parseProfile(parseFlagValue("--profile", argv)),
-    stateDir: parseFlagValue("--state-dir", argv) ?? null,
-  };
-}
+const SQLITE_PERF_TRANSCRIPT_EVENTS = 128;
+const SQLITE_PERF_TRANSCRIPT_SESSION_ID = "perf-history";
 
 function applyScale(config: ProfileConfig): ProfileConfig {
   const scale = parseStrictIntegerOption({
@@ -192,7 +127,7 @@ function applyScale(config: ProfileConfig): ProfileConfig {
     agentCount: config.agentCount,
     channelIngressEvents: config.channelIngressEvents * scale,
     cronJobs: config.cronJobs * scale,
-    cronRunLogs: config.cronRunLogs * scale,
+    cronTaskRuns: config.cronTaskRuns * scale,
     deliveryQueueEntries: config.deliveryQueueEntries * scale,
     pluginStateEntries: config.pluginStateEntries * scale,
     queryRuns: config.queryRuns,
@@ -236,7 +171,7 @@ function stateRowCount(config: ProfileConfig): number {
   return (
     config.channelIngressEvents +
     config.cronJobs +
-    config.cronRunLogs +
+    config.cronTaskRuns +
     config.deliveryQueueEntries +
     config.pluginStateEntries
   );
@@ -246,7 +181,7 @@ function seedStateDatabase(db: DatabaseSync, config: ProfileConfig): void {
   db.exec("BEGIN IMMEDIATE;");
   try {
     seedCronJobs(db, config.cronJobs);
-    seedCronRunLogs(db, config.cronRunLogs);
+    seedCronTaskRuns(db, config.cronTaskRuns);
     seedDeliveryQueue(db, config.deliveryQueueEntries);
     seedPluginState(db, config.pluginStateEntries);
     seedChannelIngress(db, config.channelIngressEvents);
@@ -278,7 +213,7 @@ function seedCronJobs(db: DatabaseSync, count: number): void {
       job_json, state_json, runtime_updated_at_ms, schedule_identity, sort_order, updated_at
     ) VALUES (
       ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 'every', NULL, NULL, ?, ?, NULL, NULL,
-      'isolated', 'now', 'agentTurn', ?, 'openai/gpt-5.5', NULL, NULL, 60,
+      'isolated', 'now', 'agentTurn', ?, 'openai/gpt-5.6-luna', NULL, NULL, 60,
       0, NULL, 1, NULL, 'announce', 'telegram', ?, NULL, 'bench-account',
       1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       NULL, NULL, NULL, ?, NULL, ?, 'completed', NULL, ?, 0, 0, 0, 'sent',
@@ -313,38 +248,38 @@ function seedCronJobs(db: DatabaseSync, count: number): void {
   }
 }
 
-function seedCronRunLogs(db: DatabaseSync, count: number): void {
+function seedCronTaskRuns(db: DatabaseSync, count: number): void {
   const insert = db.prepare(`
-    INSERT INTO cron_run_logs (
-      store_key, job_id, seq, ts, status, error, summary, diagnostics_summary,
-      delivery_status, delivery_error, delivered, session_id, session_key, run_id,
-      run_at_ms, duration_ms, next_run_at_ms, model, provider, total_tokens,
-      entry_json, created_at
-    ) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO task_runs (
+      task_id, runtime, source_id, requester_session_key, owner_key, scope_kind,
+      child_session_key, run_id, task, status, delivery_status, notify_policy,
+      created_at, started_at, ended_at, last_event_at, error, terminal_summary,
+      terminal_outcome, detail_json
+    ) VALUES (?, 'cron', ?, '', '', 'system', ?, ?, ?, ?, 'not_applicable', 'silent',
+      ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (let i = 0; i < count; i += 1) {
     const jobId = `job-${String(i % Math.max(1, Math.floor(count / 20))).padStart(8, "0")}`;
     const ts = 1_700_000_000_000 + i;
+    const succeeded = i % 17 !== 0;
+    const runId = `run-${i}`;
+    const status = succeeded ? "ok" : "error";
+    const storeKey = `/state/cron/jobs-${i % 8}.json`;
     insert.run(
-      `/state/cron/jobs-${i % 8}.json`,
+      `cron-benchmark-${i}`,
       jobId,
-      Math.floor(i / 20),
-      ts,
-      i % 17 === 0 ? "failed" : "completed",
-      `run ${i}`,
-      i % 17 === 0 ? "failed" : "sent",
-      i % 17 === 0 ? 0 : 1,
-      `session-${i}`,
       `agent:agent-${i % 16}:main`,
-      `run-${i}`,
+      runId,
+      jobId,
+      succeeded ? "succeeded" : "failed",
       ts,
-      20 + (i % 1_000),
-      ts + 60_000,
-      "openai/gpt-5.5",
-      "openai",
-      100 + (i % 2_000),
-      JSON.stringify({ ts, jobId, action: "finished" }),
       ts,
+      ts + 20 + (i % 1_000),
+      ts + 20 + (i % 1_000),
+      succeeded ? null : `run ${i} failed`,
+      `run ${i}`,
+      succeeded ? "succeeded" : null,
+      JSON.stringify({ kind: "cron-run", storeKey, action: "finished", status, runId }),
     );
   }
 }
@@ -437,11 +372,60 @@ function seedAgentDatabase(db: DatabaseSync, count: number, agentIndex: number):
         1_700_000_000_000 + i,
       );
     }
+    if (agentIndex === 0) {
+      seedTranscriptHistory(db);
+    }
     db.exec("COMMIT;");
   } catch (err) {
     db.exec("ROLLBACK;");
     throw err;
   }
+}
+
+function seedTranscriptHistory(db: DatabaseSync): void {
+  const sessionKey = "agent:perf-agent-0:history";
+  db.prepare(
+    `INSERT INTO session_nodes (session_key, current_session_id, entry_json, updated_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(sessionKey, SQLITE_PERF_TRANSCRIPT_SESSION_ID, "{}", 1_700_000_000_000);
+  db.prepare(
+    `INSERT INTO session_windows (session_id, session_key, created_at, updated_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(SQLITE_PERF_TRANSCRIPT_SESSION_ID, sessionKey, 1_700_000_000_000, 1_700_000_000_000);
+
+  const insertEvent = db.prepare(
+    `INSERT INTO transcript_events (session_id, seq, event_json, created_at)
+     VALUES (?, ?, ?, ?)`,
+  );
+  const insertIdentity = db.prepare(
+    `INSERT INTO transcript_event_identities
+       (session_id, event_id, seq, event_type, parent_id, message_idempotency_key, created_at)
+     VALUES (?, ?, ?, 'message', NULL, NULL, ?)`,
+  );
+  const insertActive = db.prepare(
+    `INSERT INTO session_transcript_active_events
+       (session_id, active_position, event_seq, message_position)
+     VALUES (?, ?, ?, ?)`,
+  );
+  for (let seq = 1; seq <= SQLITE_PERF_TRANSCRIPT_EVENTS; seq += 1) {
+    const eventId = `history-${seq}`;
+    const message = { type: "message", id: eventId, message: { role: "user", content: eventId } };
+    insertEvent.run(SQLITE_PERF_TRANSCRIPT_SESSION_ID, seq, JSON.stringify(message), seq);
+    insertIdentity.run(SQLITE_PERF_TRANSCRIPT_SESSION_ID, eventId, seq, seq);
+    insertActive.run(SQLITE_PERF_TRANSCRIPT_SESSION_ID, seq - 1, seq, seq - 1);
+  }
+  db.prepare(
+    `INSERT INTO session_transcript_index_state
+       (session_id, indexed_seq, leaf_event_id, active_event_count, active_message_count, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    SQLITE_PERF_TRANSCRIPT_SESSION_ID,
+    SQLITE_PERF_TRANSCRIPT_EVENTS,
+    `history-${SQLITE_PERF_TRANSCRIPT_EVENTS}`,
+    SQLITE_PERF_TRANSCRIPT_EVENTS,
+    SQLITE_PERF_TRANSCRIPT_EVENTS,
+    1_700_000_000_000,
+  );
 }
 
 function readIntegrity(db: DatabaseSync): string {
@@ -459,13 +443,13 @@ function percentile(values: number[], pct: number): number {
   }
   const sorted = values.toSorted((left, right) => left - right);
   const index = Math.min(sorted.length - 1, Math.ceil((pct / 100) * sorted.length) - 1);
-  return Number(sorted[index].toFixed(3));
+  return Number(expectDefined(sorted[index], `SQLite benchmark percentile ${pct}`).toFixed(3));
 }
 
 function runTimedQuery(
   db: DatabaseSync,
   query: string,
-  params: unknown[],
+  params: SQLInputValue[],
   runs: number,
 ): TimedQuery {
   const statement = db.prepare(query);
@@ -482,6 +466,21 @@ function runTimedQuery(
     query,
     rows,
   };
+}
+
+function runTimedTranscriptPage(db: DatabaseSync, start: number, runs: number): TimedQuery {
+  return runTimedQuery(
+    db,
+    `SELECT active.message_position, event.event_json
+       FROM session_transcript_active_events AS active
+       JOIN transcript_events AS event
+         ON event.session_id = active.session_id AND event.seq = active.event_seq
+      WHERE active.session_id = ?
+        AND active.message_position >= ? AND active.message_position < ?
+      ORDER BY active.message_position ASC`,
+    [SQLITE_PERF_TRANSCRIPT_SESSION_ID, start, start + 32],
+    runs,
+  );
 }
 
 function runHotQueries(params: {
@@ -550,6 +549,16 @@ function runHotQueries(params: {
       ["session_entries"],
       params.config.queryRuns,
     ),
+    runTimedTranscriptPage(
+      params.agentDb,
+      SQLITE_PERF_TRANSCRIPT_EVENTS - 32,
+      params.config.queryRuns,
+    ),
+    runTimedTranscriptPage(
+      params.agentDb,
+      Math.floor(SQLITE_PERF_TRANSCRIPT_EVENTS / 2),
+      params.config.queryRuns,
+    ),
   ];
 }
 
@@ -558,6 +567,7 @@ function printProofLines(report: BenchmarkReport): void {
   console.log(`SQLITE_PERF_PROFILE=${report.profile}`);
   console.log(`SQLITE_PERF_STATE_ROWS=${report.rows.stateRows}`);
   console.log(`SQLITE_PERF_AGENT_ROWS=${report.rows.agentCacheEntries}`);
+  console.log(`SQLITE_PERF_TRANSCRIPT_ROWS=${report.rows.transcriptEvents}`);
   console.log(`SQLITE_PERF_INTEGRITY=${report.integrity.state}`);
   console.log(`SQLITE_PERF_WAL_BYTES_BEFORE=${report.walBytes.stateBefore}`);
   console.log(`SQLITE_PERF_WAL_BYTES_AFTER=${report.walBytes.stateAfter}`);
@@ -569,12 +579,12 @@ function printProofLines(report: BenchmarkReport): void {
 
 function main(): void {
   const argv = process.argv.slice(2);
-  validateArgs(argv);
-  if (hasFlag("--help", argv)) {
+  const cli = parseSqliteStateBenchmarkCli(argv);
+  if (cli.help) {
     printUsage();
     return;
   }
-  const options = parseOptions(argv);
+  const { options } = cli;
   const config = applyScale(PROFILES[options.profile]);
   const stateDir =
     options.stateDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sqlite-perf-"));
@@ -628,10 +638,11 @@ function main(): void {
         agentDatabases: config.agentCount,
         channelIngressEvents: config.channelIngressEvents,
         cronJobs: config.cronJobs,
-        cronRunLogs: config.cronRunLogs,
+        cronTaskRuns: config.cronTaskRuns,
         deliveryQueueEntries: config.deliveryQueueEntries,
         pluginStateEntries: config.pluginStateEntries,
         stateRows: stateRowCount(config),
+        transcriptEvents: SQLITE_PERF_TRANSCRIPT_EVENTS,
       },
       timingsMs: {
         checkpoint: Number(checkpointMs.toFixed(3)),

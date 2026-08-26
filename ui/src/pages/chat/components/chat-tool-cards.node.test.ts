@@ -1,16 +1,11 @@
 // @vitest-environment node
 
-import { describe, expect, it, vi } from "vitest";
-import { extractToolCards } from "../../../lib/chat/tool-cards.ts";
-import { buildPreviewSidebarContent, buildToolCardSidebarContent } from "./chat-tool-cards.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { extractToolCardsCached as extractToolCards } from "../../../lib/chat/tool-cards.ts";
+import * as toolDisplay from "../../../lib/chat/tool-display.ts";
 
-vi.mock("../../../components/icons.ts", () => ({
-  icons: {},
-}));
-
-vi.mock("../../../lib/chat/tool-display.ts", () => ({
-  formatToolDetail: () => undefined,
-  resolveToolDisplay: ({ name }: { name: string }) => ({
+function resolveToolDisplay({ name = "" }: Parameters<typeof toolDisplay.resolveToolDisplay>[0]) {
+  return {
     name,
     label:
       {
@@ -20,11 +15,20 @@ vi.mock("../../../lib/chat/tool-display.ts", () => ({
       }[name] ??
       name
         .split(/[._-]/g)
-        .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
+        .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
         .join(" "),
     icon: "zap",
-  }),
-}));
+  } as ReturnType<typeof toolDisplay.resolveToolDisplay>;
+}
+
+beforeEach(() => {
+  vi.spyOn(toolDisplay, "formatToolDetail").mockReturnValue(undefined);
+  vi.spyOn(toolDisplay, "resolveToolDisplay").mockImplementation(resolveToolDisplay);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("tool-card extraction", () => {
   it("pretty-prints structured args and pairs tool output onto the same card", () => {
@@ -53,6 +57,7 @@ describe("tool-card extraction", () => {
     expect(cards).toHaveLength(1);
     expect(cards[0]?.id).toBe("msg:1:call-1");
     expect(cards[0]?.name).toBe("browser.open");
+    expect(cards[0]?.completed).toBe(true);
     expect(cards[0]?.outputText).toBe("Opened page");
     expect(cards[0]?.inputText).toBe(`{
   "url": "https://example.com",
@@ -78,6 +83,7 @@ describe("tool-card extraction", () => {
 
     expect(cards).toHaveLength(1);
     expect(cards[0]?.inputText).toBe("with Example Deck");
+    expect(cards[0]?.completed).toBeUndefined();
     expect(cards[0]?.outputText).toBeUndefined();
   });
 
@@ -198,6 +204,86 @@ describe("tool-card extraction", () => {
     expect(cards[1]?.outputText).toBe("B contents");
   });
 
+  it.each([
+    ["canonical IDs", { id: "call-b" }],
+    ["snake-case tool-call IDs", { tool_call_id: "call-b" }],
+    ["camel-case tool-call IDs", { toolCallId: "call-b" }],
+    ["provider tool-use IDs", { tool_use_id: "call-b" }],
+    ["camel-case tool-use IDs", { toolUseId: "call-b" }],
+    ["legacy call IDs", { callId: "call-b" }],
+  ])(
+    "keeps a same-name result with different %s separate from an open call",
+    (_label, resultId) => {
+      const cards = extractToolCards(
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call-a",
+              name: "read",
+              input: { path: "a.txt" },
+            },
+            {
+              type: "tool_result",
+              ...resultId,
+              name: "read",
+              text: "B failed",
+              isError: true,
+            },
+          ],
+        },
+        "msg:separate-owners",
+      );
+
+      expect(cards).toHaveLength(2);
+      expect(cards[0]).toMatchObject({ callId: "call-a", name: "read" });
+      expect(cards[0]?.completed).toBeUndefined();
+      expect(cards[0]?.outputText).toBeUndefined();
+      expect(cards[0]?.isError).toBeUndefined();
+      expect(cards[1]).toMatchObject({
+        callId: "call-b",
+        name: "read",
+        completed: true,
+        outputText: "B failed",
+        isError: true,
+      });
+    },
+  );
+
+  it.each([
+    ["only the call owns an ID", { id: "call-a" }, {}],
+    ["only the result owns an ID", {}, { tool_use_id: "call-b" }],
+  ])("preserves legacy same-name fallback when %s", (_label, callId, resultId) => {
+    const cards = extractToolCards(
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            ...callId,
+            name: "read",
+            input: { path: "legacy.txt" },
+          },
+          {
+            type: "tool_result",
+            ...resultId,
+            name: "read",
+            text: "Legacy contents",
+          },
+        ],
+      },
+      "msg:legacy-owner",
+    );
+
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      name: "read",
+      completed: true,
+      outputText: "Legacy contents",
+    });
+  });
+
   it("does not reuse nameless same-name calls after an empty result", () => {
     const cards = extractToolCards(
       {
@@ -230,6 +316,7 @@ describe("tool-card extraction", () => {
 
     expect(cards).toHaveLength(2);
     expect(cards[0]?.inputText).toBe('{\n  "path": "empty.txt"\n}');
+    expect(cards[0]?.completed).toBe(true);
     expect(cards[0]?.outputText).toBe("");
     expect(cards[1]?.inputText).toBe('{\n  "path": "next.txt"\n}');
     expect(cards[1]?.outputText).toBe("Next contents");
@@ -319,51 +406,6 @@ describe("tool-card extraction", () => {
     expect(standaloneCards[0]?.isError).toBe(true);
   });
 
-  it("builds sidebar content with input and empty output status", () => {
-    const [card] = extractToolCards(
-      {
-        role: "assistant",
-        toolCallId: "call-3",
-        content: [
-          {
-            type: "toolcall",
-            name: "deck_manage",
-            arguments: "with Example Deck",
-          },
-        ],
-      },
-      "msg:3",
-    );
-
-    const sidebar = buildToolCardSidebarContent(card);
-    expect(sidebar).toBe(`## Deck Manage
-
-**Tool:** \`deck_manage\`
-
-### Tool input
-\`\`\`text
-with Example Deck
-\`\`\`
-
-### Tool output
-*No output — tool completed successfully.*`);
-  });
-
-  it("builds sidebar content with a failed empty-output status for explicit errors", () => {
-    const sidebar = buildToolCardSidebarContent({
-      id: "msg:error-empty",
-      name: "lookup",
-      isError: true,
-    });
-
-    expect(sidebar).toBe(`## Lookup
-
-**Tool:** \`lookup\`
-
-### Tool error
-*No output — tool failed.*`);
-  });
-
   it("extracts canvas handle payloads into canvas previews", () => {
     const [card] = extractToolCards(
       {
@@ -397,26 +439,6 @@ with Example Deck
     expect(card?.preview?.sandbox).toBe("scripts");
   });
 
-  it("carries the preview sandbox ceiling into sidebar canvas content", () => {
-    const sidebar = buildPreviewSidebarContent(
-      {
-        kind: "canvas",
-        surface: "assistant_message",
-        render: "url",
-        viewId: "cv_widget",
-        url: "/__openclaw__/canvas/documents/cv_widget/index.html",
-        title: "Widget",
-        sandbox: "scripts",
-      },
-      null,
-    );
-
-    // Dropping the ceiling here would re-grant allow-same-origin to widget
-    // script whenever the global embed mode is "trusted".
-    expect(sidebar?.kind).toBe("canvas");
-    expect(sidebar && "sandbox" in sidebar ? sidebar.sandbox : undefined).toBe("scripts");
-  });
-
   it("uses transcript metadata ids for history-backed tool messages", () => {
     const [card] = extractToolCards(
       {
@@ -432,8 +454,51 @@ with Example Deck
     expect(card?.outputText).toBe("Opened page");
   });
 
+  it("extracts MCP App previews from sanitized result details", () => {
+    const [card] = extractToolCards(
+      {
+        role: "tool",
+        toolName: "demo__show",
+        content: [{ type: "text", text: "original result" }],
+        details: {
+          mcpAppPreview: {
+            kind: "canvas",
+            view: {
+              id: "cv_app",
+            },
+            presentation: { target: "assistant_message", sandbox: "scripts" },
+            mcpApp: { viewId: "cv_app" },
+          },
+        },
+      },
+      "msg:mcp-app",
+    );
+
+    expect(card?.outputText).toBe("original result");
+    expect(card?.preview).toMatchObject({
+      viewId: "cv_app",
+      mcpApp: { viewId: "cv_app" },
+      sandbox: "scripts",
+    });
+  });
+
   it("does not create previews for non-assistant canvas or generic outputs", () => {
     const cases = [
+      {
+        name: "node-panel target",
+        toolName: "show_widget",
+        content: JSON.stringify({
+          kind: "canvas",
+          view: {
+            id: "cv_node_panel",
+            url: "/__openclaw__/canvas/documents/cv_node_panel/index.html",
+          },
+          presentation: {
+            target: "node_panel",
+            title: "Device panel demo",
+          },
+        }),
+      },
       {
         name: "tool-card target",
         toolName: "canvas_render",
@@ -525,5 +590,89 @@ describe("tool-card canvas URLs", () => {
     expect(resolveCanvasIframeUrl("https://example.com/embed.html?x=1#y", undefined, true)).toBe(
       "https://example.com/embed.html?x=1#y",
     );
+  });
+});
+
+describe("isRunningToolCard", () => {
+  it("marks only live uncompleted cards as running while a run is active", async () => {
+    const { isRunningToolCard } = await import("./chat-tool-cards.ts");
+    const liveCard = { id: "t:1", name: "bash", live: true } as const;
+    const historicalCard = { id: "t:2", name: "bash" } as const;
+
+    expect(isRunningToolCard(liveCard, true)).toBe(true);
+    // Partial streamed output must not end the running state; only the final
+    // result event does.
+    expect(isRunningToolCard({ ...liveCard, outputText: "partial…" }, true)).toBe(true);
+    expect(isRunningToolCard({ ...liveCard, completed: true, outputText: "" }, true)).toBe(false);
+    // Historical transcript calls without results (e.g. aborted runs) must
+    // stay inert when a later run is active in the same session.
+    expect(isRunningToolCard(historicalCard, true)).toBe(false);
+    expect(isRunningToolCard(liveCard, false)).toBe(false);
+  });
+
+  it("derives a closed outcome from result presence and error state", async () => {
+    const { resolveToolCardOutcome } = await import("../../../lib/chat/tool-cards.ts");
+    const call = { id: "t:call", name: "edit" } as const;
+
+    expect(resolveToolCardOutcome(call, false)).toBe("unknown");
+    expect(resolveToolCardOutcome({ ...call, live: true }, true)).toBe("running");
+    expect(resolveToolCardOutcome({ ...call, completed: true, outputText: "" }, false)).toBe(
+      "succeeded",
+    );
+    expect(resolveToolCardOutcome({ ...call, completed: true, isError: true }, false)).toBe(
+      "failed",
+    );
+  });
+
+  it("threads live and completion markers from tool-stream messages into cards", () => {
+    const running = extractToolCards({
+      role: "assistant",
+      toolCallId: "call-live",
+      __openclawToolStreamLive: true,
+      __openclawToolStreamResultReceived: false,
+      content: [{ type: "toolcall", name: "bash", arguments: { command: "sleep 5" } }],
+    });
+    expect(running).toHaveLength(1);
+    expect(running[0]).toMatchObject({ live: true, completed: false });
+
+    const finished = extractToolCards({
+      role: "assistant",
+      toolCallId: "call-live",
+      __openclawToolStreamLive: true,
+      __openclawToolStreamResultReceived: true,
+      content: [{ type: "toolcall", name: "bash", arguments: { command: "sleep 5" } }],
+    });
+    expect(finished[0]).toMatchObject({ live: true, completed: true });
+  });
+
+  it("keeps a live card running when partial update output emits a result block", () => {
+    // The stream emits toolresult blocks for partial `update` output; only
+    // resultReceived may complete a live card, or a running tool flips to
+    // "succeeded" (or "failed", if the partial text looks like an error).
+    const partial = extractToolCards({
+      role: "assistant",
+      toolCallId: "call-live",
+      __openclawToolStreamLive: true,
+      __openclawToolStreamResultReceived: false,
+      content: [
+        { type: "toolcall", name: "bash", arguments: { command: "sleep 5" } },
+        { type: "toolresult", name: "bash", text: '{"error": "partial text"}' },
+      ],
+    });
+    expect(partial).toHaveLength(1);
+    expect(partial[0]).toMatchObject({ live: true, completed: false });
+    expect(partial[0]?.outputText).toContain("partial text");
+
+    const done = extractToolCards({
+      role: "assistant",
+      toolCallId: "call-live",
+      __openclawToolStreamLive: true,
+      __openclawToolStreamResultReceived: true,
+      content: [
+        { type: "toolcall", name: "bash", arguments: { command: "sleep 5" } },
+        { type: "toolresult", name: "bash", text: "ok" },
+      ],
+    });
+    expect(done[0]).toMatchObject({ live: true, completed: true });
   });
 });

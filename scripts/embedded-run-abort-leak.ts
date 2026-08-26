@@ -19,6 +19,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as v8 from "node:v8";
+import { expectDefined } from "../packages/normalization-core/src/expect.js";
+import { toErrorObject as toLintErrorObject } from "./lib/error-format.mts";
 
 type Mode = "production" | "closure-extracted" | "closure-inline" | "synthetic-leak";
 type Abortable = <T>(signal: AbortSignal, promise: Promise<T>) => Promise<T>;
@@ -65,7 +67,7 @@ function parseArgs(argv: string[]): Options {
   };
   const seenValueFlags = new Set<string>();
   for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
+    const arg = expectDefined(argv[i], `embedded abort benchmark argument at index ${i}`);
     const next = argv[i + 1];
     if (VALUE_FLAGS.has(arg)) {
       if (seenValueFlags.has(arg)) {
@@ -416,17 +418,3 @@ main().catch((err: unknown) => {
   process.stderr.write(`harness crashed: ${String(err)}\n${(err as Error)?.stack ?? ""}\n`);
   process.exit(2);
 });
-
-function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
-  if (value instanceof Error) {
-    return value;
-  }
-  if (typeof value === "string") {
-    return new Error(value);
-  }
-  const error = new Error(fallbackMessage, { cause: value });
-  if ((typeof value === "object" && value !== null) || typeof value === "function") {
-    Object.assign(error, value);
-  }
-  return error;
-}

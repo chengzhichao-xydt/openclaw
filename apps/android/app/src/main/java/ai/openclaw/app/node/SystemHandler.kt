@@ -1,6 +1,7 @@
 package ai.openclaw.app.node
 
 import ai.openclaw.app.gateway.GatewaySession
+import ai.openclaw.app.i18n.nativeString
 import ai.openclaw.app.mainActivityPendingIntent
 import android.Manifest
 import android.app.Notification
@@ -12,8 +13,6 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
@@ -69,9 +68,16 @@ private class AndroidSystemNotificationPoster(
     // to stable channel ids instead of mutating one shared channel.
     val (suffix, importance, name) =
       when (normalizedPriority) {
-        "passive" -> Triple("passive", NotificationManager.IMPORTANCE_LOW, "OpenClaw Passive")
-        "timesensitive" -> Triple("timesensitive", NotificationManager.IMPORTANCE_HIGH, "OpenClaw Time Sensitive")
-        else -> Triple("active", NotificationManager.IMPORTANCE_DEFAULT, "OpenClaw Active")
+        "passive" ->
+          Triple("passive", NotificationManager.IMPORTANCE_LOW, nativeString("OpenClaw Passive"))
+        "timesensitive" ->
+          Triple(
+            "timesensitive",
+            NotificationManager.IMPORTANCE_HIGH,
+            nativeString("OpenClaw Time Sensitive"),
+          )
+        else ->
+          Triple("active", NotificationManager.IMPORTANCE_DEFAULT, nativeString("OpenClaw Active"))
       }
     val channelId = "$NOTIFICATION_CHANNEL_BASE_ID.$suffix"
     val manager = appContext.getSystemService(NotificationManager::class.java)
@@ -155,7 +161,7 @@ class SystemHandler private constructor(
   }
 
   private fun parseNotifyRequest(paramsJson: String?): SystemNotifyRequest? {
-    val params = parseParamsObject(paramsJson) ?: return null
+    val params = parseJsonParamsObject(paramsJson) ?: return null
     // title/body are required by the gateway contract; optional fields only
     // influence Android channel/silence behavior.
     val rawTitle =
@@ -174,15 +180,6 @@ class SystemHandler private constructor(
       sound = sound?.trim()?.ifEmpty { null },
       priority = priority?.trim()?.ifEmpty { null },
     )
-  }
-
-  private fun parseParamsObject(paramsJson: String?): JsonObject? {
-    if (paramsJson.isNullOrBlank()) return null
-    return try {
-      Json.parseToJsonElement(paramsJson).asObjectOrNull()
-    } catch (_: Throwable) {
-      null
-    }
   }
 
   companion object {

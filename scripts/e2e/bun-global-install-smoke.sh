@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-source "$ROOT_DIR/scripts/lib/docker-e2e-container.sh"
+source "$ROOT_DIR/scripts/lib/docker-e2e-package.sh"
+source "$ROOT_DIR/scripts/lib/openclaw-e2e-instance.sh"
 
 read_positive_int_env() {
   local name="${1:?missing environment variable name}"
@@ -27,14 +28,44 @@ DOCKER_COMMAND_TIMEOUT="${DOCKER_COMMAND_TIMEOUT:-${OPENCLAW_BUN_GLOBAL_SMOKE_DO
 AI_PACKAGE_TGZ=""
 SMOKE_DIR=""
 PACK_DIR=""
+MOCK_PID=""
+GATEWAY_PID=""
+INSTALL_LOG=""
+UNTRUSTED_LOG=""
+CLI_STATUS_LOG=""
+CLI_PLUGINS_LOG=""
+MOCK_LOG=""
+MOCK_REQUEST_LOG=""
+LOCAL_AGENT_LOG=""
+GATEWAY_LOG=""
+GATEWAY_HEALTH_LOG=""
+GATEWAY_AGENT_LOG=""
 
 cleanup() {
+  openclaw_e2e_stop_process "${GATEWAY_PID:-}"
+  openclaw_e2e_stop_process "${MOCK_PID:-}"
   if [ -n "${SMOKE_DIR:-}" ]; then
     rm -rf "$SMOKE_DIR"
   fi
   if [ -n "${PACK_DIR:-}" ]; then
     rm -rf "$PACK_DIR"
   fi
+}
+
+dump_failure_logs() {
+  local status="$1"
+  echo "bun global install smoke failed with exit code $status" >&2
+  openclaw_e2e_dump_logs \
+    "$INSTALL_LOG" \
+    "$UNTRUSTED_LOG" \
+    "$CLI_STATUS_LOG" \
+    "$CLI_PLUGINS_LOG" \
+    "$MOCK_LOG" \
+    "$MOCK_REQUEST_LOG" \
+    "$LOCAL_AGENT_LOG" \
+    "$GATEWAY_LOG" \
+    "$GATEWAY_HEALTH_LOG" \
+    "$GATEWAY_AGENT_LOG" >&2 || true
 }
 
 prepare_ai_candidate() {
@@ -71,121 +102,68 @@ prepare_ai_candidate() {
 }
 
 trap cleanup EXIT
+trap 'status=$?; dump_failure_logs "$status"; exit "$status"' ERR
 
 run_with_timeout() {
   local timeout_ms="$1"
   shift
-  node scripts/e2e/lib/bun-global-install/assertions.mjs run-with-timeout "$timeout_ms" "$@"
+  node "$ROOT_DIR/scripts/e2e/lib/bun-global-install/assertions.mjs" \
+    run-with-timeout \
+    "$timeout_ms" \
+    "$@"
 }
 
-restore_dist_from_image() {
-  local image="$1"
-  local ai_backup_dir=""
-  local ai_dist_installed=0
-  local backup_dir=""
-  local container_id=""
-  local dist_installed=0
-  local restore_complete=0
-  local temp_dir=""
+reserve_runtime_ports() {
+  node --input-type=module <<'NODE'
+import net from "node:net";
 
-  cleanup_restore_dist() {
-    if [ -n "$container_id" ]; then
-      docker_e2e_docker_cmd rm -f "$container_id" >/dev/null 2>&1 || true
-    fi
-    # Both build trees come from one image. A partial swap must restore both or
-    # the following package step could mix artifacts from different builds.
-    if [ "$restore_complete" != "1" ]; then
-      if [ "$dist_installed" = "1" ]; then
-        rm -rf "$ROOT_DIR/dist" >/dev/null 2>&1 || true
-      fi
-      if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
-        if [ ! -e "$ROOT_DIR/dist" ] && mv "$backup_dir" "$ROOT_DIR/dist" >/dev/null 2>&1; then
-          backup_dir=""
-        fi
-      fi
-      if [ "$ai_dist_installed" = "1" ]; then
-        rm -rf "$ROOT_DIR/packages/ai/dist" >/dev/null 2>&1 || true
-      fi
-      if [ -n "$ai_backup_dir" ] && [ -d "$ai_backup_dir" ]; then
-        if [ ! -e "$ROOT_DIR/packages/ai/dist" ] && \
-          mv "$ai_backup_dir" "$ROOT_DIR/packages/ai/dist" >/dev/null 2>&1; then
-          ai_backup_dir=""
-        fi
-      fi
-    fi
-    if [ -n "$temp_dir" ]; then
-      rm -rf "$temp_dir"
-    fi
-    if [ "$restore_complete" = "1" ] && [ -n "$backup_dir" ]; then
-      rm -rf "$backup_dir"
-    fi
-    if [ "$restore_complete" = "1" ] && [ -n "$ai_backup_dir" ]; then
-      rm -rf "$ai_backup_dir"
-    fi
+const servers = [net.createServer(), net.createServer()];
+await Promise.all(
+  servers.map(
+    (server) =>
+      new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      }),
+  ),
+);
+console.log(servers.map((server) => server.address().port).join(" "));
+await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+NODE
+}
+
+scrub_official_external_plugin_env() {
+  local env_name
+  while IFS= read -r env_name; do
+    unset "$env_name"
+  done < <(
+    node --input-type=module - \
+      "$ROOT_DIR/scripts/lib/official-external-provider-catalog.json" <<'NODE'
+import fs from "node:fs";
+
+const catalog = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const envNames = new Set();
+const visit = (value) => {
+  if (Array.isArray(value)) {
+    value.forEach(visit);
+    return;
   }
-
-  echo "==> Reuse dist/ from Docker image: $image"
-  if ! container_id="$(docker_e2e_docker_cmd create "$image")"; then
-    cleanup_restore_dist
-    return 1
-  fi
-  if ! temp_dir="$(mktemp -d "$ROOT_DIR/.bun-dist.XXXXXX")"; then
-    cleanup_restore_dist
-    return 1
-  fi
-  if ! docker_e2e_docker_cmd cp "${container_id}:/app/dist" "$temp_dir/dist"; then
-    cleanup_restore_dist
-    return 1
-  fi
-  if ! docker_e2e_docker_cmd cp \
-    "${container_id}:/app/node_modules/@openclaw/ai/dist" \
-    "$temp_dir/ai-dist"; then
-    cleanup_restore_dist
-    return 1
-  fi
-  if [ -e "$ROOT_DIR/dist" ]; then
-    if ! backup_dir="$(mktemp -d "$ROOT_DIR/.dist-backup.XXXXXX")"; then
-      cleanup_restore_dist
-      return 1
-    fi
-    if ! rmdir "$backup_dir"; then
-      cleanup_restore_dist
-      return 1
-    fi
-    if ! mv "$ROOT_DIR/dist" "$backup_dir"; then
-      cleanup_restore_dist
-      return 1
-    fi
-  fi
-  if ! mv "$temp_dir/dist" "$ROOT_DIR/dist"; then
-    cleanup_restore_dist
-    return 1
-  fi
-  dist_installed=1
-  if [ -e "$ROOT_DIR/packages/ai/dist" ]; then
-    if ! ai_backup_dir="$(mktemp -d "$ROOT_DIR/packages/ai/.dist-backup.XXXXXX")"; then
-      cleanup_restore_dist
-      return 1
-    fi
-    if ! rmdir "$ai_backup_dir"; then
-      cleanup_restore_dist
-      return 1
-    fi
-    if ! mv "$ROOT_DIR/packages/ai/dist" "$ai_backup_dir"; then
-      cleanup_restore_dist
-      return 1
-    fi
-  fi
-  if ! mv "$temp_dir/ai-dist" "$ROOT_DIR/packages/ai/dist"; then
-    cleanup_restore_dist
-    return 1
-  fi
-  ai_dist_installed=1
-  restore_complete=1
-  cleanup_restore_dist
+  if (!value || typeof value !== "object") {
+    return;
+  }
+  if (Array.isArray(value.envVars)) {
+    value.envVars.forEach((name) => envNames.add(name));
+  }
+  Object.values(value).forEach(visit);
+};
+visit(catalog);
+console.log([...envNames].toSorted().join("\n"));
+NODE
+  )
 }
 
 resolve_package_tgz() {
+  local -a package_args
   if [ -n "$PACKAGE_TGZ" ]; then
     if [ ! -f "$PACKAGE_TGZ" ]; then
       echo "OPENCLAW_BUN_GLOBAL_SMOKE_PACKAGE_TGZ does not exist: $PACKAGE_TGZ" >&2
@@ -196,7 +174,7 @@ resolve_package_tgz() {
   fi
 
   if [ -n "$DIST_IMAGE" ]; then
-    restore_dist_from_image "$DIST_IMAGE"
+    docker_e2e_restore_package_dist_from_image "$DIST_IMAGE"
   elif [ "$HOST_BUILD" != "0" ]; then
     echo "==> Build host package artifacts"
     pnpm build
@@ -212,11 +190,16 @@ resolve_package_tgz() {
   PACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/openclaw-bun-pack.XXXXXX")"
 
   echo "==> Pack OpenClaw tarball"
+  package_args=(
+    --skip-build
+    --output-dir "$PACK_DIR"
+    --output-name openclaw-current.tgz
+  )
+  if [[ "${OPENCLAW_BUN_GLOBAL_SMOKE_ALLOW_UNRELEASED_CHANGELOG:-true}" == "true" ]]; then
+    package_args+=(--allow-unreleased-changelog)
+  fi
   PACKAGE_TGZ="$(
-    node scripts/package-openclaw-for-docker.mjs \
-      --skip-build \
-      --output-dir "$PACK_DIR" \
-      --output-name openclaw-current.tgz
+    node scripts/package-openclaw-for-docker.mjs "${package_args[@]}"
   )"
   if [ -z "$PACKAGE_TGZ" ] || [ ! -f "$PACKAGE_TGZ" ]; then
     echo "missing packed OpenClaw tarball" >&2
@@ -236,8 +219,16 @@ main() {
   prepare_ai_candidate
 
   local bun_path
+  local bun_version
+  local gateway_port
+  local mock_port
+  local openclaw_entry
   local openclaw_bin
+  local package_root
+  local success_marker
   bun_path="$(command -v "$BUN_BIN")"
+  bun_version="$("$bun_path" --version)"
+  node scripts/e2e/lib/bun-global-install/assertions.mjs assert-bun-version "$bun_version"
   SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/openclaw-bun-global.XXXXXX")"
 
   export HOME="$SMOKE_DIR/home"
@@ -245,11 +236,21 @@ main() {
   export XDG_CACHE_HOME="$SMOKE_DIR/cache"
   export OPENCLAW_NO_ONBOARD=1
   export OPENCLAW_DISABLE_UPDATE_CHECK=1
+  export OPENCLAW_STATE_DIR="$SMOKE_DIR/state"
+  export OPENCLAW_CONFIG_PATH="$OPENCLAW_STATE_DIR/openclaw.json"
+  scrub_official_external_plugin_env
+  export OPENAI_API_KEY="openclaw-bun-global-smoke-key"
+  export OPENCLAW_GATEWAY_TOKEN="openclaw-bun-global-smoke-token"
   export NO_COLOR=1
-  mkdir -p "$HOME" "$BUN_INSTALL/bin" "$BUN_INSTALL/install/global" "$XDG_CACHE_HOME"
+  mkdir -p \
+    "$HOME" \
+    "$BUN_INSTALL/bin" \
+    "$BUN_INSTALL/install/global" \
+    "$XDG_CACHE_HOME" \
+    "$OPENCLAW_STATE_DIR"
   export PATH="$BUN_INSTALL/bin:$(dirname "$(command -v node)"):$PATH"
-  # Release publishes @openclaw/ai first. Bun 1.3.14 ignores bundled deps in
-  # local tarballs, so resolve that one package from the exact candidate bytes.
+  # Release publishes @openclaw/ai first. Pin the local tarball install to
+  # exact candidate bytes instead of allowing public-registry resolution.
   node --input-type=module - \
     "$BUN_INSTALL/install/global/package.json" \
     "$AI_PACKAGE_TGZ" <<'NODE'
@@ -262,11 +263,20 @@ fs.writeFileSync(
 );
 NODE
 
-  echo "==> Bun version"
-  "$bun_path" --version
+  INSTALL_LOG="$SMOKE_DIR/install.log"
+  UNTRUSTED_LOG="$SMOKE_DIR/untrusted.log"
+  CLI_STATUS_LOG="$SMOKE_DIR/status.json"
+  CLI_PLUGINS_LOG="$SMOKE_DIR/plugins.json"
+  MOCK_LOG="$SMOKE_DIR/mock-openai.log"
+  MOCK_REQUEST_LOG="$SMOKE_DIR/mock-openai-requests.jsonl"
+  LOCAL_AGENT_LOG="$SMOKE_DIR/local-agent.log"
+  GATEWAY_LOG="$SMOKE_DIR/gateway.log"
+  GATEWAY_HEALTH_LOG="$SMOKE_DIR/gateway-health.json"
+  GATEWAY_AGENT_LOG="$SMOKE_DIR/gateway-agent.log"
 
-  echo "==> Bun global install packed OpenClaw"
-  "$bun_path" install -g "$PACKAGE_TGZ" --no-progress
+  echo "==> Install packed OpenClaw with trusted lifecycle scripts on Bun $bun_version"
+  run_with_timeout "$COMMAND_TIMEOUT_MS" \
+    "$bun_path" install -g --trust "$PACKAGE_TGZ" --no-progress >"$INSTALL_LOG" 2>&1
 
   openclaw_bin="$BUN_INSTALL/bin/openclaw"
   if [ ! -x "$openclaw_bin" ]; then
@@ -276,14 +286,120 @@ NODE
     echo "Bun global install did not create an executable openclaw binary" >&2
     exit 1
   fi
+  openclaw_entry="$(
+    node -e 'const fs = require("node:fs"); process.stdout.write(fs.realpathSync(process.argv[1]));' \
+      "$openclaw_bin"
+  )"
+  package_root="$(dirname "$openclaw_entry")"
+  export OPENCLAW_E2E_REDACTOR_MODULE="$package_root/dist/plugin-sdk/logging-core.js"
+
+  echo "==> Verify OpenClaw lifecycle scripts were trusted and executed"
+  run_with_timeout "$COMMAND_TIMEOUT_MS" "$bun_path" pm -g untrusted >"$UNTRUSTED_LOG" 2>&1
+  node scripts/e2e/lib/bun-global-install/assertions.mjs \
+    assert-openclaw-trusted \
+    "$package_root" \
+    "$BUN_INSTALL/install/global/package.json" \
+    "$UNTRUSTED_LOG"
 
   echo "==> OpenClaw version through Bun global install"
-  run_with_timeout "$COMMAND_TIMEOUT_MS" "$openclaw_bin" --version
+  local openclaw_version
+  openclaw_version="$(run_with_timeout "$COMMAND_TIMEOUT_MS" "$openclaw_bin" --version)"
+  printf "%s\n" "$openclaw_version"
 
-  echo "==> OpenClaw image providers through Bun global install"
+  echo "==> OpenClaw help through Bun global install"
+  run_with_timeout "$COMMAND_TIMEOUT_MS" "$openclaw_bin" --help >/dev/null
+
+  run_bun_cli() {
+    run_with_timeout "$COMMAND_TIMEOUT_MS" "$bun_path" "$openclaw_entry" "$@"
+  }
+
+  echo "==> Installed package entry under Bun"
+  run_bun_cli --version
+  run_bun_cli --help >/dev/null
+  pushd "$HOME" >/dev/null
+  run_with_timeout "$COMMAND_TIMEOUT_MS" "$bun_path" run --bun openclaw --version
+  popd >/dev/null
+
+  echo "==> OpenClaw image providers under Bun"
   local providers_json
-  providers_json="$(run_with_timeout "$COMMAND_TIMEOUT_MS" "$openclaw_bin" infer image providers --json)"
+  providers_json="$(run_bun_cli infer image providers --json)"
   OPENCLAW_IMAGE_PROVIDERS_JSON="$providers_json" node scripts/e2e/lib/bun-global-install/assertions.mjs assert-image-providers
+
+  read -r gateway_port mock_port < <(reserve_runtime_ports)
+  success_marker="OPENCLAW_BUN_GLOBAL_RUNTIME_OK"
+  export SUCCESS_MARKER="$success_marker" MOCK_REQUEST_LOG
+  node scripts/e2e/lib/bun-global-install/assertions.mjs \
+    configure-runtime \
+    "$OPENCLAW_CONFIG_PATH" \
+    "$mock_port" \
+    "$gateway_port"
+
+  echo "==> Representative CLI state under Bun"
+  run_bun_cli status --json --timeout 1 >"$CLI_STATUS_LOG" 2>&1
+  run_bun_cli plugins list --json >"$CLI_PLUGINS_LOG" 2>&1
+
+  echo "==> Local mocked agent turn under Bun"
+  MOCK_PID="$(openclaw_e2e_start_mock_openai "$mock_port" "$MOCK_LOG")"
+  openclaw_e2e_wait_mock_openai "$mock_port"
+  : >"$MOCK_REQUEST_LOG"
+  run_bun_cli agent --local \
+    --agent main \
+    --session-id bun-global-local-agent \
+    --message "Return marker $success_marker" \
+    --thinking off \
+    --json >"$LOCAL_AGENT_LOG" 2>&1
+  node scripts/e2e/lib/bun-global-install/assertions.mjs \
+    assert-agent-turn \
+    "$success_marker" \
+    "$LOCAL_AGENT_LOG" \
+    "$MOCK_REQUEST_LOG"
+
+  echo "==> Gateway health and mocked agent turn under Bun"
+  : >"$MOCK_REQUEST_LOG"
+  GATEWAY_PID="$(
+    openclaw_e2e_start_tracked_process \
+      "$GATEWAY_LOG" \
+      "$bun_path" \
+      "$openclaw_entry" \
+      gateway \
+      --port "$gateway_port" \
+      --bind loopback
+  )"
+  openclaw_e2e_wait_gateway_ready "$GATEWAY_PID" "$GATEWAY_LOG" 300 "$gateway_port"
+  run_bun_cli gateway health \
+    --token "$OPENCLAW_GATEWAY_TOKEN" \
+    --json >"$GATEWAY_HEALTH_LOG" 2>&1
+  run_bun_cli agent \
+    --agent main \
+    --session-id bun-global-gateway-agent \
+    --message "Return marker $success_marker" \
+    --thinking off \
+    --json >"$GATEWAY_AGENT_LOG" 2>&1
+  node scripts/e2e/lib/bun-global-install/assertions.mjs \
+    assert-agent-turn \
+    "$success_marker" \
+    "$GATEWAY_AGENT_LOG" \
+    "$MOCK_REQUEST_LOG"
+
+  echo "bun-global-install-smoke: Bun $bun_version package, CLI, local agent, and Gateway runtime OK"
+
+  if [ -n "${OPENCLAW_BUN_GLOBAL_SMOKE_PROOF_PATH:-}" ]; then
+    node --input-type=module - \
+      "$OPENCLAW_BUN_GLOBAL_SMOKE_PROOF_PATH" \
+      "$bun_path" \
+      "$openclaw_bin" \
+      "$openclaw_version" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+
+const [, , proofPath, bunPath, openclawPath, openclawVersion] = process.argv;
+fs.mkdirSync(path.dirname(proofPath), { recursive: true });
+fs.writeFileSync(
+  proofPath,
+  `${JSON.stringify({ bunPath, openclawPath, openclawVersion }, null, 2)}\n`,
+);
+NODE
+  fi
 }
 
 main "$@"

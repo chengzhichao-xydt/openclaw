@@ -3,9 +3,10 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import { parseClawHubPluginSpec } from "../infra/clawhub-spec.js";
 import { parseRegistryNpmSpec, type ParsedRegistryNpmSpec } from "../infra/npm-registry-spec.js";
 import type { PluginPackageInstall } from "./manifest.js";
+import { normalizePluginInstallDefaultChoice } from "./plugin-install-default-choice.js";
 
 /** Warning emitted while describing plugin package install source metadata. */
-export type PluginInstallSourceWarning =
+type PluginInstallSourceWarning =
   | "invalid-clawhub-spec"
   | "invalid-npm-spec"
   | "invalid-default-choice"
@@ -17,14 +18,14 @@ export type PluginInstallSourceWarning =
   | "npm-spec-package-name-mismatch";
 
 /** Pinning state for npm plugin install metadata. */
-export type PluginInstallNpmPinState =
+type PluginInstallNpmPinState =
   | "exact-with-integrity"
   | "exact-without-integrity"
   | "floating-with-integrity"
   | "floating-without-integrity";
 
 /** Parsed npm install source metadata for a plugin package. */
-export type PluginInstallNpmSourceInfo = {
+type PluginInstallNpmSourceInfo = {
   spec: string;
   packageName: string;
   expectedPackageName?: string;
@@ -36,12 +37,12 @@ export type PluginInstallNpmSourceInfo = {
 };
 
 /** Parsed local install source metadata for a plugin package. */
-export type PluginInstallLocalSourceInfo = {
+type PluginInstallLocalSourceInfo = {
   path: string;
 };
 
 /** Parsed ClawHub install source metadata for a plugin package. */
-export type PluginInstallClawHubSourceInfo = {
+type PluginInstallClawHubSourceInfo = {
   spec: string;
   packageName: string;
   version?: string;
@@ -58,7 +59,7 @@ export type PluginInstallSourceInfo = {
 };
 
 /** Options for describing expected plugin install source metadata. */
-export type DescribePluginInstallSourceOptions = {
+type DescribePluginInstallSourceOptions = {
   expectedPackageName?: string | null;
 };
 
@@ -70,10 +71,6 @@ function resolveNpmPinState(params: {
     return params.hasIntegrity ? "exact-with-integrity" : "exact-without-integrity";
   }
   return params.hasIntegrity ? "floating-with-integrity" : "floating-without-integrity";
-}
-
-function resolveDefaultChoice(value: unknown): PluginPackageInstall["defaultChoice"] | undefined {
-  return value === "clawhub" || value === "npm" || value === "local" ? value : undefined;
 }
 
 function normalizeExpectedPackageName(value: string | null | undefined): string | undefined {
@@ -92,7 +89,7 @@ export function describePluginInstallSource(
   const clawhubSpec = normalizeOptionalString(install.clawhubSpec);
   const npmSpec = normalizeOptionalString(install.npmSpec);
   const localPath = normalizeOptionalString(install.localPath);
-  const defaultChoice = resolveDefaultChoice(install.defaultChoice);
+  const defaultChoice = normalizePluginInstallDefaultChoice(install.defaultChoice);
   const expectedIntegrity = normalizeOptionalString(install.expectedIntegrity);
   const expectedPackageName = normalizeExpectedPackageName(options?.expectedPackageName);
   const warnings: PluginInstallSourceWarning[] = [];

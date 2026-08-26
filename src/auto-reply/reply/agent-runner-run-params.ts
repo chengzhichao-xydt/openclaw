@@ -19,18 +19,21 @@ export function resolveModelFallbackOptions(
   configOverride: FollowupRun["run"]["config"] = run.config,
 ) {
   const config = configOverride;
-  const fallbacksOverride = resolveEffectiveModelFallbacks({
-    cfg: config,
-    agentId: run.agentId,
-    sessionKey: run.sessionKey,
-    hasSessionModelOverride: run.hasSessionModelOverride === true,
-    modelOverrideSource: run.modelOverrideSource,
-    hasAutoFallbackProvenance: run.hasAutoFallbackProvenance === true,
-  });
+  const fallbacksOverride = run.modelSelectionLocked
+    ? []
+    : resolveEffectiveModelFallbacks({
+        cfg: config,
+        agentId: run.agentId,
+        sessionKey: run.sessionKey,
+        hasSessionModelOverride: run.hasSessionModelOverride === true,
+        modelOverrideSource: run.modelOverrideSource,
+        hasAutoFallbackProvenance: run.hasAutoFallbackProvenance === true,
+      });
   return {
     cfg: config,
     provider: run.provider,
     model: run.model,
+    requestedRouteResolution: run.requestedRouteResolution,
     agentDir: run.agentDir,
     agentId: run.agentId,
     sessionKey: run.runtimePolicySessionKey ?? run.sessionKey,
@@ -69,14 +72,16 @@ export function buildEmbeddedRunBaseParams(params: {
   isReasoningTagProvider?: ReasoningTagProviderResolver;
 }) {
   const config = params.run.config;
-  const modelFallbacksOverride = resolveEffectiveModelFallbacks({
-    cfg: config,
-    agentId: params.run.agentId,
-    sessionKey: params.run.sessionKey,
-    hasSessionModelOverride: params.run.hasSessionModelOverride === true,
-    modelOverrideSource: params.run.modelOverrideSource,
-    hasAutoFallbackProvenance: params.run.hasAutoFallbackProvenance === true,
-  });
+  const modelFallbacksOverride = params.run.modelSelectionLocked
+    ? []
+    : resolveEffectiveModelFallbacks({
+        cfg: config,
+        agentId: params.run.agentId,
+        sessionKey: params.run.sessionKey,
+        hasSessionModelOverride: params.run.hasSessionModelOverride === true,
+        modelOverrideSource: params.run.modelOverrideSource,
+        hasAutoFallbackProvenance: params.run.hasAutoFallbackProvenance === true,
+      });
   const enforceFinalTag = resolveEnforceFinalTagWithResolver(
     params.run,
     params.provider,
@@ -84,27 +89,38 @@ export function buildEmbeddedRunBaseParams(params: {
     params.isReasoningTagProvider,
   );
   // Runtime policy keys may differ from session keys for direct-message scoped policy.
-  return {
+  const runParams = {
     sessionFile: params.run.sessionFile,
     workspaceDir: params.run.workspaceDir,
     cwd: params.run.cwd,
+    permissionMode: params.run.permissionMode,
+    sessionRoot: params.run.sessionRoot,
     agentDir: params.run.agentDir,
     config,
+    toolOverrides: params.run.toolOverrides,
     skillsSnapshot: params.run.skillsSnapshot,
     ownerNumbers: params.run.ownerNumbers,
     inputProvenance: params.run.inputProvenance,
+    trustedInternalHandoff: params.run.trustedInternalHandoff,
+    scheduledToolPolicy: params.run.scheduledToolPolicy,
+    runtimePluginToolGrant: params.run.runtimePluginToolGrant,
     senderIsOwner: params.run.senderIsOwner,
+    conversationToolPolicy: params.run.conversationToolPolicy,
     channelContext: params.run.channelContext,
     approvalReviewerDeviceId: params.run.approvalReviewerDeviceId,
     enforceFinalTag,
     silentExpected: params.run.silentExpected,
     allowEmptyAssistantReplyAsSilent: params.run.allowEmptyAssistantReplyAsSilent,
+    terminalReplyExpectation: params.run.terminalReplyExpectation,
     silentReplyPromptMode: params.run.silentReplyPromptMode,
     sourceReplyDeliveryMode: params.run.sourceReplyDeliveryMode,
     clientCaps: params.run.clientCaps,
+    toolBindings: params.run.toolBindings,
     taskSuggestionDeliveryMode: params.run.taskSuggestionDeliveryMode,
+    skillWorkshopProposalRevision: params.run.skillWorkshopProposalRevision,
     provider: params.provider,
     model: params.model,
+    modelSelectionLocked: params.run.modelSelectionLocked,
     modelFallbacksOverride,
     ...params.authProfile,
     thinkLevel: params.run.thinkLevel,
@@ -119,4 +135,5 @@ export function buildEmbeddedRunBaseParams(params: {
     promptCacheKey: params.promptCacheKey,
     allowTransientCooldownProbe: params.allowTransientCooldownProbe,
   };
+  return runParams;
 }

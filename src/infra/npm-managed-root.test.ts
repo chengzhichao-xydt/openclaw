@@ -162,6 +162,73 @@ describe("managed npm root", () => {
     );
   });
 
+  it.each([
+    { installedState: "missing package manifest", expectedMissing: true },
+    { installedState: "invalid package manifest", expectedMissing: true },
+    { installedState: "missing native executable", expectedMissing: true },
+    {
+      installedState: "non-executable native executable",
+      expectedMissing: process.platform !== "win32",
+    },
+    { installedState: "installed native executable", expectedMissing: false },
+  ])(
+    "validates current-platform package contents: $installedState",
+    async ({ installedState, expectedMissing }) => {
+      const npmRoot = await makeTempRoot();
+      const platformPackage = "@vendor/tool-platform";
+      const canonicalPackage = "@vendor/tool";
+      const packagePath = path.join(npmRoot, "node_modules", ...platformPackage.split("/"));
+      await fs.mkdir(packagePath, { recursive: true });
+      await fs.writeFile(
+        path.join(npmRoot, "package-lock.json"),
+        JSON.stringify({
+          lockfileVersion: 3,
+          packages: {
+            "": {},
+            [`node_modules/${canonicalPackage}`]: {
+              bin: { tool: "bin/tool.js" },
+            },
+            [`node_modules/${platformPackage}`]: {
+              name: canonicalPackage,
+              optional: true,
+              os: [process.platform],
+              cpu: [process.arch],
+            },
+          },
+        }),
+      );
+
+      if (installedState === "invalid package manifest") {
+        await fs.writeFile(path.join(packagePath, "package.json"), "{", "utf8");
+      } else if (installedState !== "missing package manifest") {
+        await fs.writeFile(
+          path.join(packagePath, "package.json"),
+          JSON.stringify({ name: canonicalPackage, version: "1.0.0-platform", files: ["vendor"] }),
+        );
+        const nativeBinDir = path.join(packagePath, "vendor", "current-platform", "bin");
+        await fs.mkdir(nativeBinDir, { recursive: true });
+        await fs.writeFile(path.join(nativeBinDir, "tool-helper"), "helper", "utf8");
+        if (
+          installedState === "installed native executable" ||
+          installedState === "non-executable native executable"
+        ) {
+          const executableName = process.platform === "win32" ? "tool.exe" : "tool";
+          await fs.writeFile(path.join(nativeBinDir, executableName), "native executable", {
+            encoding: "utf8",
+            mode: installedState === "installed native executable" ? 0o755 : 0o644,
+          });
+        }
+      }
+
+      await expect(
+        listMissingRequiredPlatformPackages({
+          npmRoot,
+          requiredPackageNames: [platformPackage],
+        }),
+      ).resolves.toEqual(expectedMissing ? [{ name: platformPackage, packagePath }] : []);
+    },
+  );
+
   it("keeps existing plugin dependencies when adding another managed plugin", async () => {
     const npmRoot = await makeTempRoot();
     await fs.writeFile(
@@ -230,7 +297,7 @@ describe("managed npm root", () => {
       packageName: "@openclaw/feishu",
       dependencySpec: "2026.5.4",
       managedOverrides: {
-        axios: "1.16.0",
+        axios: "1.18.0",
         "node-domexception": "npm:@nolyfill/domexception@1.0.28",
         nested: {
           semver: "1.2.3",
@@ -249,7 +316,7 @@ describe("managed npm root", () => {
       },
       overrides: {
         "left-pad": "1.3.0",
-        axios: "1.16.0",
+        axios: "1.18.0",
         "node-domexception": "npm:@nolyfill/domexception@1.0.28",
         nested: {
           alias: "npm:@scope/alias@1.0.0",
@@ -269,9 +336,9 @@ describe("managed npm root", () => {
       npmRoot,
       packageName: "@openclaw/feishu",
       dependencySpec: "2026.5.4",
-      omitUnsupportedManagedOverrides: true,
+      overrideOmissions: { npmAliases: true },
       managedOverrides: {
-        axios: "1.16.0",
+        axios: "1.18.0",
         "node-domexception": "npm:@nolyfill/domexception@1.0.28",
         nested: {
           alias: "npm:@scope/alias@1.0.0",
@@ -284,7 +351,7 @@ describe("managed npm root", () => {
       fs.readFile(path.join(npmRoot, "package.json"), "utf8").then((raw) => JSON.parse(raw)),
     ).resolves.toMatchObject({
       overrides: {
-        axios: "1.16.0",
+        axios: "1.18.0",
         nested: {
           semver: "1.2.3",
         },
@@ -351,7 +418,7 @@ describe("managed npm root", () => {
       dependencySpec: "2.0.0",
       managedOverrides: {
         "pinned-package": "1.0.0",
-        axios: "1.16.0",
+        axios: "1.18.0",
       },
     });
 
@@ -363,7 +430,7 @@ describe("managed npm root", () => {
         "pinned-package": "2.0.0",
       },
       overrides: {
-        axios: "1.16.0",
+        axios: "1.18.0",
       },
       openclaw: {
         managedOverrides: ["axios"],
@@ -537,7 +604,7 @@ describe("managed npm root", () => {
     const expectedOverrides = workspace.overrides ?? {};
 
     expect(expectedOverrides).toMatchObject({
-      axios: "1.16.0",
+      axios: "1.19.0",
       "node-domexception": "npm:@nolyfill/domexception@1.0.28",
     });
     await expect(readOpenClawManagedNpmRootOverrides()).resolves.toEqual(expectedOverrides);
@@ -558,7 +625,7 @@ describe("managed npm root", () => {
     );
     await fs.writeFile(
       path.join(packageRoot, "pnpm-workspace.yaml"),
-      "overrides:\n  axios: 1.16.0\n",
+      "overrides:\n  axios: 1.18.0\n",
     );
 
     await expect(
@@ -567,7 +634,7 @@ describe("managed npm root", () => {
         cwd: path.join(packageRoot, "dist"),
       }),
     ).resolves.toEqual({
-      axios: "1.16.0",
+      axios: "1.18.0",
     });
   });
 
@@ -598,7 +665,7 @@ describe("managed npm root", () => {
         "  nested:",
         '    optional-runtime: "$optional-runtime"',
         '    alias: "$node-domexception"',
-        "  axios: 1.16.0",
+        "  axios: 1.18.0",
         '  node-domexception: "$node-domexception"',
         "",
       ].join("\n"),
@@ -610,7 +677,7 @@ describe("managed npm root", () => {
         "optional-runtime": "2.0.0",
         alias: "npm:@nolyfill/domexception@1.0.28",
       },
-      axios: "1.16.0",
+      axios: "1.18.0",
       "node-domexception": "npm:@nolyfill/domexception@1.0.28",
     });
   });
@@ -1580,3 +1647,4 @@ describe("managed npm root", () => {
     await expectPathMissing(path.join(npmRoot, "node_modules", ".package-lock.json"));
   });
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

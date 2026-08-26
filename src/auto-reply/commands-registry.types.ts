@@ -33,6 +33,7 @@ export type CommandArgChoiceContext = {
   cfg?: OpenClawConfig;
   provider?: string;
   model?: string;
+  agentRuntime?: string;
   catalog?: ThinkingCatalogEntry[];
   command: ChatCommandDefinition;
   arg: CommandArgDefinition;
@@ -95,6 +96,8 @@ export type NativeCommandSpec = {
 /** Extra context used when normalizing slash command text. */
 export type CommandNormalizeOptions = {
   botUsername?: string;
+  /** Strip an explicit command target only while channel bot identity is unavailable. */
+  targetedCommandMode?: "pre-identity";
 };
 
 /** Cached exact/regex command detector built from current registry aliases. */

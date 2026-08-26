@@ -45,25 +45,25 @@ describe("extended-stable Full Release Validation workflow", () => {
     const childDispatches = [
       {
         job: "normal_ci",
-        step: "Dispatch and monitor CI",
+        step: "Dispatch CI",
         workflow: "ci.yml",
         target: '-f target_ref="$TARGET_SHA"',
       },
       {
         job: "plugin_prerelease",
-        step: "Dispatch and monitor plugin prerelease",
+        step: "Dispatch plugin prerelease",
         workflow: "plugin-prerelease.yml",
         target: '-f target_ref="$TARGET_SHA" -f expected_sha="$TARGET_SHA"',
       },
       {
         job: "release_checks",
-        step: "Dispatch and monitor release checks",
+        step: "Dispatch release checks",
         workflow: "openclaw-release-checks.yml",
         target: '-f expected_sha="$TARGET_SHA"',
       },
       {
         job: "performance",
-        step: "Dispatch and monitor OpenClaw Performance",
+        step: "Dispatch OpenClaw Performance",
         workflow: "openclaw-performance.yml",
         target: '-f target_ref="$TARGET_SHA"',
       },
@@ -76,11 +76,10 @@ describe("extended-stable Full Release Validation workflow", () => {
       expect(run).toContain(child.target);
     }
 
+    expect(fullValidation).toContain("PARENT_WORKFLOW_SHA: ${{ github.sha }}");
+    expect(fullValidation).toContain('if [[ "$child_head_sha" != "$PARENT_WORKFLOW_SHA" ]]');
     expect(fullValidation).toContain(
-      '"$CHILD_WORKFLOW_REF" =~ ^extended-stable/[0-9]{4}\\.([1-9]|1[0-2])\\.33$',
-    );
-    expect(fullValidation).toContain(
-      "Dispatch Full Release Validation from a release-ci or extended-stable ref pinned to the target SHA",
+      "child run used workflow SHA ${child_head_sha}, expected parent workflow SHA ${PARENT_WORKFLOW_SHA}",
     );
   });
 
@@ -90,7 +89,7 @@ describe("extended-stable Full Release Validation workflow", () => {
       "refs/heads/extended-stable/2026.12.33",
     ]) {
       const result = runReleaseChecksTrustedRefGuard(valid);
-      expect(result.status, result.stderr).toBe(0);
+      expect(result.status, String(result.stderr)).toBe(0);
     }
 
     for (const invalid of [

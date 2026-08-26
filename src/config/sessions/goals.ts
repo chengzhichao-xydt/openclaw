@@ -1,11 +1,15 @@
 // Session goal state tracks objective progress and token budgets in the session store.
 import crypto from "node:crypto";
+import {
+  recordSessionGoalChanged,
+  type SessionStateActorType,
+} from "../../sessions/session-state-events.js";
 import { formatTokenCount } from "../../utils/token-format.js";
-import { loadSessionEntry, patchSessionEntry } from "./session-accessor.js";
+import { loadSessionEntryReadOnly, patchSessionEntryCore } from "./session-accessor.js";
 import { resolveFreshSessionTotalTokens } from "./types.js";
 import type { SessionEntry, SessionGoal, SessionGoalStatus } from "./types.js";
 
-export type SessionGoalSnapshot = {
+type SessionGoalSnapshot = {
   status: "missing" | "found";
   goal?: SessionGoal;
 };
@@ -16,6 +20,8 @@ type SessionGoalStoreOptions = {
   now?: number;
   fallbackEntry?: SessionEntry;
   persist?: boolean;
+  actor?: { type: SessionStateActorType; id?: string };
+  agentId?: string;
 };
 
 type CreateSessionGoalOptions = SessionGoalStoreOptions & {
@@ -43,13 +49,13 @@ function normalizeTokenCount(value: number | undefined): number | undefined {
 }
 
 function resolveEntryFreshTotalTokens(
-  entry: Pick<SessionEntry, "totalTokens" | "totalTokensFresh">,
+  entry: Pick<SessionEntry, "totalTokens" | "totalTokensFresh" | "totalTokensVersion">,
 ): number | undefined {
   return normalizeTokenCount(resolveFreshSessionTotalTokens(entry));
 }
 
 function resolveEntryGoalStartTokens(
-  entry: Pick<SessionEntry, "totalTokens" | "totalTokensFresh">,
+  entry: Pick<SessionEntry, "totalTokens" | "totalTokensFresh" | "totalTokensVersion">,
 ): number {
   return resolveEntryFreshTotalTokens(entry) ?? 0;
 }
@@ -63,8 +69,22 @@ function cloneGoal(goal: SessionGoal): SessionGoal {
   return { ...goal };
 }
 
+function recordGoalChange(
+  options: SessionGoalStoreOptions,
+  entry: SessionEntry,
+  summary: string,
+): void {
+  recordSessionGoalChanged({
+    sessionKey: options.sessionKey,
+    entry,
+    actor: options.actor,
+    agentId: options.agentId,
+    summary,
+  });
+}
+
 export function resolveSessionGoalDisplayState(
-  entry: Pick<SessionEntry, "goal" | "totalTokens" | "totalTokensFresh">,
+  entry: Pick<SessionEntry, "goal" | "totalTokens" | "totalTokensFresh" | "totalTokensVersion">,
   now?: number,
   options?: { adoptFreshBaseline?: boolean },
 ): SessionGoal | undefined {
@@ -72,7 +92,7 @@ export function resolveSessionGoalDisplayState(
 }
 
 function accountGoalUsage(
-  entry: Pick<SessionEntry, "goal" | "totalTokens" | "totalTokensFresh">,
+  entry: Pick<SessionEntry, "goal" | "totalTokens" | "totalTokensFresh" | "totalTokensVersion">,
   now: number,
   options?: { adoptFreshBaseline?: boolean },
 ): SessionGoal | undefined {
@@ -162,7 +182,7 @@ export async function getSessionGoal(
   if (options.persist === false) {
     // Status rendering should not write incidental budget/baseline adoption unless callers opt in.
     const entry =
-      loadSessionEntry({ sessionKey: options.sessionKey, storePath: options.storePath }) ??
+      loadSessionEntryReadOnly({ sessionKey: options.sessionKey, storePath: options.storePath }) ??
       options.fallbackEntry;
     const projected = entry
       ? resolveSessionGoalDisplayState(entry, now, { adoptFreshBaseline: false })
@@ -170,7 +190,7 @@ export async function getSessionGoal(
     return projected ? { status: "found", goal: projected } : { status: "missing" };
   }
   let goal: SessionGoal | undefined;
-  const result = await patchSessionEntry(
+  const result = await patchSessionEntryCore(
     { sessionKey: options.sessionKey, storePath: options.storePath },
     (entry) => {
       const accounted = accountGoalUsage(entry, now);
@@ -195,7 +215,7 @@ export async function createSessionGoal(options: CreateSessionGoalOptions): Prom
   }
   const now = nowMs(options.now);
   let created: SessionGoal | undefined;
-  const result = await patchSessionEntry(
+  const result = await patchSessionEntryCore(
     { sessionKey: options.sessionKey, storePath: options.storePath },
     (entry) => {
       if (entry.goal) {
@@ -223,6 +243,7 @@ export async function createSessionGoal(options: CreateSessionGoalOptions): Prom
   if (!result || !created) {
     throw new Error("session not found");
   }
+  recordGoalChange(options, result, "goal created");
   return cloneGoal(created);
 }
 
@@ -232,7 +253,7 @@ export async function updateSessionGoalStatus(
   const now = nowMs(options.now);
   let updated: SessionGoal | undefined;
   let foundSession = false;
-  const result = await patchSessionEntry(
+  const result = await patchSessionEntryCore(
     { sessionKey: options.sessionKey, storePath: options.storePath },
     (entry) => {
       foundSession = true;
@@ -281,6 +302,7 @@ export async function updateSessionGoalStatus(
   if (!result || !updated) {
     throw new Error(foundSession ? "goal not found" : "session not found");
   }
+  recordGoalChange(options, result, `goal status changed to ${updated.status}`);
   return cloneGoal(updated);
 }
 
@@ -294,7 +316,7 @@ export async function updateSessionGoalObjective(
   const now = nowMs(options.now);
   let updated: SessionGoal | undefined;
   let foundSession = false;
-  const result = await patchSessionEntry(
+  const result = await patchSessionEntryCore(
     { sessionKey: options.sessionKey, storePath: options.storePath },
     (entry) => {
       foundSession = true;
@@ -313,12 +335,13 @@ export async function updateSessionGoalObjective(
   if (!result || !updated) {
     throw new Error(foundSession ? "goal not found" : "session not found");
   }
+  recordGoalChange(options, result, "goal objective changed");
   return cloneGoal(updated);
 }
 
 export async function clearSessionGoal(options: SessionGoalStoreOptions): Promise<boolean> {
   let removed = false;
-  const result = await patchSessionEntry(
+  const result = await patchSessionEntryCore(
     { sessionKey: options.sessionKey, storePath: options.storePath },
     (entry) => {
       if (!entry.goal) {
@@ -328,5 +351,8 @@ export async function clearSessionGoal(options: SessionGoalStoreOptions): Promis
       return { goal: undefined };
     },
   );
+  if (result && removed) {
+    recordGoalChange(options, result, "goal cleared");
+  }
   return Boolean(result && removed);
 }

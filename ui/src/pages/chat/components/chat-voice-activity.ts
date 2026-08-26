@@ -1,4 +1,5 @@
 import { html, nothing, type TemplateResult } from "lit";
+import { ifDefined } from "lit/directives/if-defined.js";
 import { icons } from "../../../components/icons.ts";
 import "../../../components/tooltip.ts";
 import { t } from "../../../i18n/index.ts";
@@ -9,9 +10,24 @@ const BAR_GAINS = [0.38, 0.62, 0.84, 1, 0.84, 0.62, 0.38];
 const MICROPHONE_ACTIVITY_TAG = "openclaw-microphone-activity";
 const EMPTY_LEVEL_SIGNAL = new RealtimeTalkLevelSignal();
 
+// Wider meters ask for more bars via the `bars` attribute; the default 7-bar
+// profile stays byte-identical for the talk button observed by its e2e suite.
+function activityBarGains(count: number): number[] {
+  if (count === BAR_GAINS.length) {
+    return BAR_GAINS;
+  }
+  return Array.from(
+    { length: count },
+    (_, index) => 0.35 + 0.65 * Math.sin(Math.PI * ((index + 0.5) / count)),
+  );
+}
+
 class MicrophoneActivityElement extends HTMLElement {
   private levelSignal: RealtimeTalkLevelSignal | undefined;
   private unsubscribe: (() => void) | null = null;
+  private gains: number[] = BAR_GAINS;
+  // Scroll mode renders a right-to-left history, newest on the right.
+  private history: number[] | null = null;
 
   set signal(signal: RealtimeTalkLevelSignal | undefined) {
     if (signal === this.levelSignal) {
@@ -39,7 +55,12 @@ class MicrophoneActivityElement extends HTMLElement {
 
   private ensureBars(): void {
     if (!this.firstElementChild) {
-      for (const [index] of BAR_GAINS.entries()) {
+      const requested = Number(this.getAttribute("bars"));
+      this.gains = activityBarGains(
+        Number.isInteger(requested) && requested > 0 ? requested : BAR_GAINS.length,
+      );
+      this.history = this.getAttribute("mode") === "scroll" ? this.gains.map(() => 0) : null;
+      for (const [index] of this.gains.entries()) {
         const bar = document.createElement("span");
         bar.className = "agent-chat__voice-activity-bar";
         bar.style.setProperty("--talk-bar-delay", `${index * -70}ms`);
@@ -55,12 +76,15 @@ class MicrophoneActivityElement extends HTMLElement {
 
   private renderLevel(level: number): void {
     this.dataset.level = String(level);
+    if (this.history) {
+      this.history.push(level);
+      this.history.shift();
+    }
     for (const [index, bar] of [...this.children].entries()) {
-      const gain = BAR_GAINS[index] ?? 1;
-      (bar as HTMLElement).style.setProperty(
-        "--talk-bar-scale",
-        String(0.18 + level * gain * 0.82),
-      );
+      const scale = this.history
+        ? 0.12 + (this.history[index] ?? 0) * 0.88
+        : 0.18 + level * (this.gains[index] ?? 1) * 0.82;
+      (bar as HTMLElement).style.setProperty("--talk-bar-scale", String(scale));
     }
   }
 }
@@ -69,80 +93,80 @@ if (!customElements.get(MICROPHONE_ACTIVITY_TAG)) {
   customElements.define(MICROPHONE_ACTIVITY_TAG, MicrophoneActivityElement);
 }
 
-type ChatVoiceActivityProps = {
-  active?: boolean;
-  status?: RealtimeTalkStatus;
-  detail?: string | null;
-  inputLevel?: RealtimeTalkLevelSignal;
-  onDismissError?: () => void;
-};
-
 function activeStatus(
   status: RealtimeTalkStatus | undefined,
 ): "connecting" | "listening" | "thinking" {
   return status === "connecting" || status === "thinking" ? status : "listening";
 }
 
-function statusLabel(status: RealtimeTalkStatus | undefined, detail: string | null | undefined) {
+export function voiceStatusLabel(
+  status: RealtimeTalkStatus | undefined,
+  detail: string | null | undefined,
+) {
   const explicitDetail = detail?.trim();
   if (explicitDetail) {
     return explicitDetail;
   }
   if (status === "thinking") {
-    return "Asking OpenClaw...";
+    return t("chat.voice.asking");
   }
   if (status === "connecting") {
-    return "Connecting voice input...";
+    return t("chat.voice.connecting");
   }
-  return "Listening...";
+  return t("chat.voice.listening");
 }
 
-export function renderChatVoiceActivity(
-  props: ChatVoiceActivityProps,
-): TemplateResult | typeof nothing {
-  if (props.status === "error" && props.detail) {
-    return html`
-      <div class="agent-chat__stt-interim agent-chat__talk-status" role="alert">
-        <span class="agent-chat__talk-status-text">${props.detail}</span>
-        ${props.onDismissError
-          ? html`
-              <openclaw-tooltip .content=${t("chat.composer.dismissVoiceInputError")}>
-                <button
-                  class="callout__dismiss"
-                  type="button"
-                  @click=${props.onDismissError}
-                  aria-label=${t("chat.composer.dismissVoiceInputError")}
-                >
-                  ${icons.x}
-                </button>
-              </openclaw-tooltip>
-            `
-          : nothing}
-      </div>
-    `;
-  }
-  if (!props.active) {
+type MicrophoneActivityProps = {
+  status?: RealtimeTalkStatus;
+  inputLevel?: RealtimeTalkLevelSignal;
+  bars?: number;
+  mode?: "scroll";
+};
+
+// Class names and data attributes are asserted by the talk e2e suite; the
+// element is decorative inside the labeled stop-voice button, so it stays
+// aria-hidden while `data-status` keeps driving the bar animations.
+export function renderMicrophoneActivity(props: MicrophoneActivityProps): TemplateResult {
+  return html`
+    <openclaw-microphone-activity
+      class="agent-chat__voice-activity"
+      data-status=${activeStatus(props.status)}
+      data-source="microphone"
+      bars=${ifDefined(props.bars)}
+      mode=${ifDefined(props.mode)}
+      aria-hidden="true"
+      .signal=${props.inputLevel ?? EMPTY_LEVEL_SIGNAL}
+    >
+    </openclaw-microphone-activity>
+  `;
+}
+
+type ChatVoiceErrorProps = {
+  status?: RealtimeTalkStatus;
+  detail?: string | null;
+  onDismissError?: () => void;
+};
+
+export function renderChatVoiceError(props: ChatVoiceErrorProps): TemplateResult | typeof nothing {
+  if (props.status !== "error" || !props.detail) {
     return nothing;
   }
-
-  const status = activeStatus(props.status);
   return html`
-    <div
-      class="agent-chat__stt-interim agent-chat__talk-status agent-chat__talk-status--active"
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-    >
-      <openclaw-microphone-activity
-        class="agent-chat__voice-activity"
-        data-status=${status}
-        data-source="microphone"
-        role="img"
-        aria-label=${t("chat.composer.microphoneInput")}
-        .signal=${props.inputLevel ?? EMPTY_LEVEL_SIGNAL}
-      >
-      </openclaw-microphone-activity>
-      <span class="agent-chat__sr-only">${statusLabel(props.status, props.detail)}</span>
+    <div class="agent-chat__composer-error agent-chat__talk-status" role="alert">
+      <span class="agent-chat__composer-error-icon" aria-hidden="true">${icons.alertTriangle}</span>
+      <span class="agent-chat__talk-status-text">${props.detail}</span>
+      ${props.onDismissError
+        ? html`
+            <button
+              class="callout__dismiss"
+              type="button"
+              @click=${props.onDismissError}
+              aria-label=${t("chat.composer.dismissVoiceInputError")}
+            >
+              ${icons.x}
+            </button>
+          `
+        : nothing}
     </div>
   `;
 }

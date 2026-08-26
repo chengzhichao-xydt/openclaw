@@ -4,6 +4,7 @@ import path from "node:path";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { pathExists } from "openclaw/plugin-sdk/security-runtime";
 import { ensureRepoBoundDirectory, resolveRepoRelativeOutputDir } from "../cli-paths.js";
+import { toQaError } from "../errors.js";
 import {
   acquireQaCredentialLease,
   startQaCredentialLeaseHeartbeat,
@@ -11,14 +12,13 @@ import {
 import { isTruthyOptIn, trimToValue } from "../mantis-options.runtime.js";
 import { createPhaseTimer, type MantisPhaseTimings } from "../mantis-phase-timer.runtime.js";
 import {
+  copyCrabboxArtifacts,
   type CommandRunner,
-  type CrabboxInspect,
   defaultCommandRunner,
   inspectCrabbox,
   resolveCrabboxBin,
   runCommand,
   shellQuote,
-  sshCommand,
   stopCrabbox,
   warmupCrabbox,
 } from "./crabbox-runtime.js";
@@ -46,7 +46,7 @@ export type MantisTelegramDesktopBuilderOptions = {
 
 export type MantisTelegramDesktopHydrateMode = "prehydrated" | "source";
 
-export type MantisTelegramDesktopBuilderResult = {
+type MantisTelegramDesktopBuilderResult = {
   outputDir: string;
   reportPath: string;
   screenshotPath?: string;
@@ -314,7 +314,9 @@ if [ -n "\${OPENCLAW_LIVE_OPENAI_KEY:-}" ] && [ -z "\${OPENAI_API_KEY:-}" ]; the
 fi
 if ! command -v node >/dev/null 2>&1; then
   sudo apt-get update -y >"$out/node-apt.log" 2>&1
-  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - >>"$out/node-apt.log" 2>&1
+  # Complete the setup download before execution; a timed-out stream may be partial.
+  curl -fsSL --connect-timeout 10 --max-time 120 https://deb.nodesource.com/setup_22.x -o "$out/nodesource-setup.sh"
+  sudo -E bash "$out/nodesource-setup.sh" >>"$out/node-apt.log" 2>&1
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >>"$out/node-apt.log" 2>&1
 fi
 if ! command -v scrot >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; then
@@ -329,7 +331,7 @@ telegram_root="$HOME/.local/share/openclaw-mantis/telegram-desktop-bin"
 telegram_bin="$telegram_root/Telegram/Telegram"
 if [ ! -x "$telegram_bin" ]; then
   mkdir -p "$telegram_root"
-  curl -fsSL https://telegram.org/dl/desktop/linux -o "$out/telegram-desktop.tar.xz"
+  curl -fsSL --connect-timeout 10 --max-time 600 --retry 2 --retry-delay 2 https://telegram.org/dl/desktop/linux -o "$out/telegram-desktop.tar.xz"
   tar -xJf "$out/telegram-desktop.tar.xz" -C "$telegram_root"
 fi
 if [ -z "$telegram_profile_dir" ] || [ "$telegram_profile_dir" = "\\$HOME/.local/share/TelegramDesktop" ]; then
@@ -397,7 +399,9 @@ qa_status=0
     fi
     driver_user_id="$(node --input-type=module >"$out/telegram-driver-getme.json" 2>"$out/telegram-driver-getme.err" <<'MANTIS_TELEGRAM_GETME'
 const token = process.env.OPENCLAW_MANTIS_TELEGRAM_DRIVER_BOT_TOKEN;
-const response = await fetch(\`https://api.telegram.org/bot\${token}/getMe\`);
+const response = await fetch(\`https://api.telegram.org/bot\${token}/getMe\`, {
+  signal: AbortSignal.timeout(15_000),
+});
 const body = await response.json();
 process.stdout.write(JSON.stringify({ ok: body.ok, id: body.result?.id, username: body.result?.username }));
 if (!body.ok || !body.result?.id) process.exit(1);
@@ -438,6 +442,7 @@ const response = await fetch(\`https://api.telegram.org/bot\${token}/sendMessage
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify({ chat_id: chatId, text, disable_notification: true }),
+  signal: AbortSignal.timeout(15_000),
 });
 const body = await response.json();
 process.stdout.write(JSON.stringify({ ok: body.ok, message_id: body.result?.message_id }));
@@ -532,30 +537,6 @@ function renderReport(summary: MantisTelegramDesktopBuilderSummary) {
     "",
   ].filter((line) => line !== undefined);
   return `${lines.join("\n")}\n`;
-}
-
-async function copyRemoteArtifacts(params: {
-  cwd: string;
-  env: NodeJS.ProcessEnv;
-  inspect: CrabboxInspect;
-  outputDir: string;
-  remoteOutputDir: string;
-  runner: CommandRunner;
-}) {
-  const { host, sshArgs, sshUser } = sshCommand({ inspect: params.inspect });
-  await runCommand({
-    command: "rsync",
-    args: [
-      "-az",
-      "-e",
-      sshArgs,
-      `${sshUser}@${host}:${params.remoteOutputDir}/`,
-      `${params.outputDir}/`,
-    ],
-    cwd: params.cwd,
-    env: params.env,
-    runner: params.runner,
-  });
 }
 
 export async function runMantisTelegramDesktopBuilder(
@@ -698,7 +679,7 @@ export async function runMantisTelegramDesktopBuilder(
     );
     leaseHeartbeat?.throwIfFailed();
     await timer.timePhase("artifacts.copy", () =>
-      copyRemoteArtifacts({
+      copyCrabboxArtifacts({
         cwd: repoRoot,
         env,
         inspect: inspected,
@@ -722,7 +703,7 @@ export async function runMantisTelegramDesktopBuilder(
       timer.updatePhaseStatus("crabbox.remote_run", "accepted");
     }
     if (remoteRunError && !gatewaySetupCompleted) {
-      throw toErrorObject(remoteRunError);
+      throw toQaError(remoteRunError);
     }
     if (gatewaySetup && !gatewaySetupCompleted) {
       throw new Error("Telegram desktop builder did not report a live OpenClaw gateway.");
@@ -805,28 +786,37 @@ export async function runMantisTelegramDesktopBuilder(
       videoPath,
     };
   } finally {
-    if (summary) {
-      summary.finishedAt = new Date().toISOString();
-      summary.timings = timer.snapshot();
-      await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
-      await fs.writeFile(reportPath, renderReport(summary), "utf8");
-    }
-    if (createdLease && leaseId && !keepLease) {
-      await stopCrabbox({ crabboxBin, cwd: repoRoot, env, leaseId, provider, runner });
-    }
-    if (leaseHeartbeat) {
-      await leaseHeartbeat.stop().catch((error: unknown) => {
-        console.warn(`Telegram credential heartbeat cleanup failed: ${formatErrorMessage(error)}`);
-      });
-    }
-    if (credentialLease) {
-      await credentialLease.release().catch((error: unknown) => {
-        console.warn(`Telegram credential release failed: ${formatErrorMessage(error)}`);
-      });
+    try {
+      if (summary) {
+        summary.finishedAt = new Date().toISOString();
+        summary.timings = timer.snapshot();
+        await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+        await fs.writeFile(reportPath, renderReport(summary), "utf8");
+      }
+    } finally {
+      try {
+        if (createdLease && leaseId && !keepLease) {
+          await stopCrabbox({ crabboxBin, cwd: repoRoot, env, leaseId, provider, runner });
+        }
+      } finally {
+        try {
+          if (leaseHeartbeat) {
+            await leaseHeartbeat.stop().catch((error: unknown) => {
+              console.warn(
+                `Telegram credential heartbeat cleanup failed: ${formatErrorMessage(error)}`,
+              );
+            });
+          }
+        } finally {
+          if (credentialLease) {
+            await credentialLease.release().catch((error: unknown) => {
+              console.warn(`Telegram credential release failed: ${formatErrorMessage(error)}`);
+            });
+          }
+        }
+      }
     }
   }
 }
 
-function toErrorObject(error: unknown): Error {
-  return error instanceof Error ? error : new Error(formatErrorMessage(error));
-}
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

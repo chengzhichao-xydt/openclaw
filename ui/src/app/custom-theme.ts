@@ -1,7 +1,8 @@
-import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
+import { asNullableRecord as readThemeRecord } from "@openclaw/normalization-core/record-coerce";
 // Control UI module implements custom theme behavior.
-import { z } from "zod";
-import { normalizeOptionalString } from "../lib/string-coerce.ts";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
+import { readResponseTextWithLimit } from "../lib/response-body.ts";
 
 const TWEAKCN_HOSTS = new Set(["tweakcn.com", "www.tweakcn.com"]);
 const THEME_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -89,29 +90,6 @@ const MODE_TOKEN_ORDER = [
 type ModeTokenName = (typeof MODE_TOKEN_ORDER)[number];
 type ThemeTokenMap = Record<ModeTokenName, string>;
 
-const REQUIRED_TWEAKCN_MODE_VARS = [
-  "background",
-  "foreground",
-  "card",
-  "card-foreground",
-  "popover",
-  "popover-foreground",
-  "primary",
-  "primary-foreground",
-  "secondary",
-  "secondary-foreground",
-  "muted",
-  "muted-foreground",
-  "accent",
-  "accent-foreground",
-  "destructive",
-  "destructive-foreground",
-  "border",
-  "input",
-  "ring",
-] as const;
-type RequiredTweakcnModeVar = (typeof REQUIRED_TWEAKCN_MODE_VARS)[number];
-
 export type ImportedCustomTheme = {
   sourceUrl: string;
   themeId: string;
@@ -121,40 +99,9 @@ export type ImportedCustomTheme = {
   dark: ThemeTokenMap;
 };
 
-const cssTokenSchema = z.string().max(MAX_CSS_TOKEN_LENGTH);
-
-function createStringShape<const T extends readonly string[]>(keys: T) {
-  return Object.fromEntries(keys.map((key) => [key, cssTokenSchema])) as Record<
-    T[number],
-    typeof cssTokenSchema
-  >;
-}
-
-const tweakcnThemeSchema = z.object({
-  name: z.string().max(80).optional(),
-  cssVars: z.object({
-    theme: z
-      .object({
-        "font-sans": cssTokenSchema.optional(),
-        "font-mono": cssTokenSchema.optional(),
-      })
-      .optional(),
-    light: z.object(createStringShape(REQUIRED_TWEAKCN_MODE_VARS)),
-    dark: z.object(createStringShape(REQUIRED_TWEAKCN_MODE_VARS)),
-  }),
-});
-
-const importedCustomThemeSchema = z.object({
-  sourceUrl: z.string(),
-  themeId: z.string(),
-  label: z.string(),
-  importedAt: z.string(),
-  light: z.object(createStringShape(MODE_TOKEN_ORDER)),
-  dark: z.object(createStringShape(MODE_TOKEN_ORDER)),
-});
-
-type TweakcnThemePayload = z.infer<typeof tweakcnThemeSchema>;
-
+// Shape checks are intentionally shallow: normalizeStoredTokenMap and
+// resolveModeVar re-validate every token (presence, length, safe CSS) and
+// throw on anything off, so no schema library is needed at this boundary.
 type TweakcnThemeResolution = {
   sourceUrl: string;
   fetchUrl: string;
@@ -169,13 +116,17 @@ function requireThemeId(value: string) {
 
 function normalizeThemeIdFromPath(pathname: string): string | null {
   const segments = pathname.split("/").filter(Boolean);
+  const themeId = segments.at(-1);
+  if (!themeId) {
+    return null;
+  }
   if (segments.length === 2 && segments[0] === "themes") {
-    requireThemeId(segments[1]);
-    return segments[1];
+    requireThemeId(themeId);
+    return themeId;
   }
   if (segments.length === 3 && segments[0] === "r" && segments[1] === "themes") {
-    requireThemeId(segments[2]);
-    return segments[2];
+    requireThemeId(themeId);
+    return themeId;
   }
   return null;
 }
@@ -297,7 +248,7 @@ function makeTokenMap(entries: Array<[ModeTokenName, string]>): ThemeTokenMap {
   return Object.fromEntries(entries) as ThemeTokenMap;
 }
 
-function normalizeStoredTokenMap(value: Record<string, string> | undefined): ThemeTokenMap | null {
+function normalizeStoredTokenMap(value: Record<string, unknown> | undefined): ThemeTokenMap | null {
   if (!value || typeof value !== "object") {
     return null;
   }
@@ -313,8 +264,8 @@ function normalizeStoredTokenMap(value: Record<string, string> | undefined): The
 }
 
 function resolveModeVar(
-  theme: Record<string, string | undefined>,
-  shared: Record<string, string | undefined> | undefined,
+  theme: Record<string, unknown>,
+  shared: Record<string, unknown> | undefined,
   key: string,
   fallback?: string,
 ) {
@@ -336,8 +287,8 @@ function resolveModeVar(
 
 function normalizeModeTokenMap(
   mode: "light" | "dark",
-  theme: Record<RequiredTweakcnModeVar, string>,
-  shared: Record<string, string | undefined> | undefined,
+  theme: Record<string, unknown>,
+  shared: Record<string, unknown> | undefined,
 ): ThemeTokenMap {
   const isLight = mode === "light";
   const contrastTarget = isLight ? "black" : "white";
@@ -433,7 +384,7 @@ function describeThemeLabel(value: string | undefined) {
   return truncateUtf16Safe(normalized, 80);
 }
 
-export function normalizeTweakcnThemeUrl(input: string): TweakcnThemeResolution {
+function normalizeTweakcnThemeUrl(input: string): TweakcnThemeResolution {
   const normalized = normalizePastedThemeInput(input);
   let parsed: URL;
   try {
@@ -453,22 +404,31 @@ export function normalizeTweakcnThemeUrl(input: string): TweakcnThemeResolution 
 }
 
 export function parseImportedCustomTheme(value: unknown): ImportedCustomTheme | null {
-  const parsed = importedCustomThemeSchema.safeParse(value);
-  if (!parsed.success) {
+  const record = readThemeRecord(value);
+  if (!record) {
+    return null;
+  }
+  const { sourceUrl, themeId, label, importedAt } = record;
+  if (
+    typeof sourceUrl !== "string" ||
+    typeof themeId !== "string" ||
+    typeof label !== "string" ||
+    typeof importedAt !== "string"
+  ) {
     return null;
   }
   try {
-    requireThemeId(parsed.data.themeId);
-    const light = normalizeStoredTokenMap(parsed.data.light);
-    const dark = normalizeStoredTokenMap(parsed.data.dark);
+    requireThemeId(themeId);
+    const light = normalizeStoredTokenMap(readThemeRecord(record.light) ?? undefined);
+    const dark = normalizeStoredTokenMap(readThemeRecord(record.dark) ?? undefined);
     if (!light || !dark) {
       return null;
     }
     return {
-      sourceUrl: parsed.data.sourceUrl,
-      themeId: parsed.data.themeId,
-      label: describeThemeLabel(parsed.data.label),
-      importedAt: parsed.data.importedAt,
+      sourceUrl,
+      themeId,
+      label: describeThemeLabel(label),
+      importedAt,
       light,
       dark,
     };
@@ -477,23 +437,25 @@ export function parseImportedCustomTheme(value: unknown): ImportedCustomTheme | 
   }
 }
 
-export function normalizeImportedCustomTheme(
+function normalizeImportedCustomTheme(
   payload: unknown,
   resolution: Pick<TweakcnThemeResolution, "sourceUrl" | "themeId">,
 ): ImportedCustomTheme {
-  const parsed = tweakcnThemeSchema.safeParse(payload);
-  if (!parsed.success) {
+  const record = readThemeRecord(payload);
+  const cssVars = readThemeRecord(record?.cssVars);
+  const light = readThemeRecord(cssVars?.light);
+  const dark = readThemeRecord(cssVars?.dark);
+  const shared = cssVars?.theme === undefined ? undefined : readThemeRecord(cssVars.theme);
+  if (!record || !cssVars || !light || !dark || shared === null) {
     throw new Error("tweakcn returned an invalid theme payload.");
   }
-  const data: TweakcnThemePayload = parsed.data;
-  const shared = data.cssVars.theme;
   return {
     sourceUrl: resolution.sourceUrl,
     themeId: resolution.themeId,
-    label: describeThemeLabel(data.name),
+    label: describeThemeLabel(normalizeOptionalString(record.name)),
     importedAt: new Date().toISOString(),
-    light: normalizeModeTokenMap("light", data.cssVars.light, shared),
-    dark: normalizeModeTokenMap("dark", data.cssVars.dark, shared),
+    light: normalizeModeTokenMap("light", light, shared),
+    dark: normalizeModeTokenMap("dark", dark, shared),
   };
 }
 
@@ -512,51 +474,12 @@ function assertTweakcnResponseUrl(value: string | undefined) {
   }
 }
 
-function parseContentLength(headers: Headers): number | null {
-  const raw = headers.get("content-length");
-  if (!raw) {
-    return null;
-  }
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
-
-async function readResponseTextWithLimit(response: Response): Promise<string> {
-  const contentLength = parseContentLength(response.headers);
-  if (contentLength != null && contentLength > MAX_TWEAKCN_THEME_BYTES) {
-    throw new Error("tweakcn theme payload is too large.");
-  }
-
-  if (!response.body) {
-    throw new Error("tweakcn returned an unreadable theme payload.");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let bytes = 0;
-  let text = "";
-  try {
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) {
-        break;
-      }
-      bytes += chunk.value.byteLength;
-      if (bytes > MAX_TWEAKCN_THEME_BYTES) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error("tweakcn theme payload is too large.");
-      }
-      text += decoder.decode(chunk.value, { stream: true });
-    }
-    text += decoder.decode();
-    return text;
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 async function readJsonResponseWithLimit(response: Response): Promise<unknown> {
-  const text = await readResponseTextWithLimit(response);
+  const text = await readResponseTextWithLimit(response, {
+    maxBytes: MAX_TWEAKCN_THEME_BYTES,
+    tooLargeMessage: "tweakcn theme payload is too large.",
+    missingBodyMessage: "tweakcn returned an unreadable theme payload.",
+  });
   try {
     return JSON.parse(text) as unknown;
   } catch {
@@ -593,7 +516,7 @@ export async function importCustomThemeFromUrl(
   }
 }
 
-export function buildCustomThemeStyles(theme: ImportedCustomTheme) {
+function buildCustomThemeStyles(theme: ImportedCustomTheme) {
   const light = normalizeStoredTokenMap(theme.light);
   const dark = normalizeStoredTokenMap(theme.dark);
   if (!light || !dark) {

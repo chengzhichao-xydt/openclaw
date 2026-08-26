@@ -14,6 +14,8 @@ export type MessagingToolSend = {
   text?: string;
   mediaUrls?: string[];
   hasRichContent?: true;
+  /** Current-source progress (`false`) or completed reply (`true`). */
+  sourceReplyFinal?: boolean;
 };
 
 export type MessagingToolSourceReplyPayload = Pick<
@@ -27,4 +29,7 @@ export type MessagingToolSourceReplyPayload = Pick<
   | "text"
 > & {
   idempotencyKey?: string;
+  transcriptOwner?: true;
+  /** Current-source progress (`false`) or completed reply (`true`). */
+  sourceReplyFinal?: boolean;
 };

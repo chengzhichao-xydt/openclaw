@@ -12,14 +12,13 @@ import {
 import { ensureSandboxWorkspaceForSession } from "../../agents/sandbox.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
-import { resolveChannelAccountMediaMaxMb } from "../../media/configured-max-bytes.js";
+import { resolveOutboundMediaMaxBytes } from "../../media/configured-max-bytes.js";
 import { resolveOutboundAttachmentFromUrl } from "../../media/outbound-attachment.js";
 import { resolveAgentScopedOutboundMediaAccess } from "../../media/read-capability.js";
-import { MEDIA_MAX_BYTES } from "../../media/store.js";
 import { appendReplyMediaFailureWarning, copyReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
 
-const FILE_URL_RE = /^file:\/\//i;
+const FILE_URL_RE = /^file:/i;
 const WINDOWS_DRIVE_RE = /^[a-zA-Z]:[\\/]/;
 const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 const HAS_FILE_EXT_RE = /\.\w{1,10}$/;
@@ -42,18 +41,6 @@ function getPayloadMediaList(payload: ReplyPayload): string[] {
   return resolveSendableOutboundReplyParts(payload).mediaUrls;
 }
 
-function resolveReplyMediaMaxBytes(params: {
-  cfg: OpenClawConfig;
-  channel?: string;
-  accountId?: string;
-}): number {
-  const limitMb =
-    resolveChannelAccountMediaMaxMb(params) ?? params.cfg.agents?.defaults?.mediaMaxMb;
-  return typeof limitMb === "number" && Number.isFinite(limitMb) && limitMb > 0
-    ? Math.floor(limitMb * 1024 * 1024)
-    : MEDIA_MAX_BYTES;
-}
-
 export function createReplyMediaPathNormalizer(params: {
   cfg: OpenClawConfig;
   sessionKey?: string;
@@ -68,6 +55,8 @@ export function createReplyMediaPathNormalizer(params: {
   requesterSenderName?: string;
   requesterSenderUsername?: string;
   requesterSenderE164?: string;
+  sandboxRoot?: string;
+  sandboxContainerWorkdir?: string;
 }): (payload: ReplyPayload) => Promise<ReplyPayload> {
   // Prefer an explicit agentId so callers without a resolved sessionKey (e.g.
   // `openclaw agent --deliver` with `--reply-channel/--reply-to`) still get
@@ -77,23 +66,35 @@ export function createReplyMediaPathNormalizer(params: {
     (params.sessionKey
       ? resolveSessionAgentId({ sessionKey: params.sessionKey, config: params.cfg })
       : undefined);
-  const maxBytes = resolveReplyMediaMaxBytes({
+  const maxBytes = resolveOutboundMediaMaxBytes({
     cfg: params.cfg,
     channel: params.messageProvider,
     accountId: params.accountId,
   });
-  let sandboxRootPromise: Promise<string | undefined> | undefined;
+  const explicitSandboxRoot = params.sandboxRoot?.trim();
+  let sandboxWorkspacePromise:
+    | Promise<{ root: string; containerWorkdir?: string } | undefined>
+    | undefined = explicitSandboxRoot
+    ? Promise.resolve({
+        root: explicitSandboxRoot,
+        containerWorkdir: params.sandboxContainerWorkdir,
+      })
+    : undefined;
   const persistedMediaBySource = new Map<string, Promise<string>>();
 
-  const resolveSandboxRoot = async (): Promise<string | undefined> => {
-    if (!sandboxRootPromise) {
-      sandboxRootPromise = ensureSandboxWorkspaceForSession({
+  const resolveSandboxWorkspace = async () => {
+    if (!sandboxWorkspacePromise) {
+      sandboxWorkspacePromise = ensureSandboxWorkspaceForSession({
         config: params.cfg,
         sessionKey: params.sessionKey,
         workspaceDir: params.workspaceDir,
-      }).then((sandbox) => sandbox?.workspaceDir);
+      }).then((sandbox) =>
+        sandbox
+          ? { root: sandbox.workspaceDir, containerWorkdir: sandbox.containerWorkdir }
+          : undefined,
+      );
     }
-    return await sandboxRootPromise;
+    return await sandboxWorkspacePromise;
   };
 
   const resolveMediaAccessForSource = (media: string) =>
@@ -175,13 +176,14 @@ export function createReplyMediaPathNormalizer(params: {
       !media.startsWith("~") &&
       !path.isAbsolute(media) &&
       !WINDOWS_DRIVE_RE.test(media);
-    const sandboxRoot = await resolveSandboxRoot();
-    if (sandboxRoot) {
+    const sandboxWorkspace = await resolveSandboxWorkspace();
+    if (sandboxWorkspace) {
       let sandboxResolvedMedia: string;
       try {
         sandboxResolvedMedia = await resolveSandboxedMediaSource({
           media,
-          sandboxRoot,
+          sandboxRoot: sandboxWorkspace.root,
+          containerWorkdir: sandboxWorkspace.containerWorkdir,
         });
       } catch (err) {
         if (FILE_URL_RE.test(media)) {

@@ -11,13 +11,13 @@ type BuildManager = "pnpm" | "bun" | "npm";
 
 type UpdatePackageManagerRequirement = "allow-fallback" | "require-preferred";
 
-export type UpdatePackageManagerFailureReason =
+type UpdatePackageManagerFailureReason =
   | "preferred-manager-unavailable"
   | "pnpm-corepack-enable-failed"
   | "pnpm-corepack-missing"
   | "pnpm-npm-bootstrap-failed";
 
-export type PackageManagerCommandRunner = (
+type PackageManagerCommandRunner = (
   argv: string[],
   options: { timeoutMs: number; env?: NodeJS.ProcessEnv },
 ) => Promise<{ stdout: string; stderr: string; code: number | null }>;

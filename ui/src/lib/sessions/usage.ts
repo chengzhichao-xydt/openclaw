@@ -4,7 +4,7 @@ import type { GatewayBrowserClient } from "../../api/gateway.ts";
 
 type SessionRequestClient = Pick<GatewayBrowserClient, "request">;
 
-export type SessionUsageQuery = {
+type SessionUsageQuery = {
   startDate: string;
   endDate: string;
   scope: "instance" | "family";
@@ -28,6 +28,7 @@ export function buildSessionUsageDateParams(timeZone: "local" | "utc") {
     ? { mode: "utc" }
     : {
         mode: "specific",
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         utcOffset: formatUtcOffset(new Date().getTimezoneOffset()),
       };
 }
@@ -39,7 +40,6 @@ function buildSessionUsageParams(query: SessionUsageQuery): Record<string, unkno
     ...(query.agentId ? { agentId: query.agentId } : { agentScope: "all" }),
     ...buildSessionUsageDateParams(query.timeZone),
     groupBy: query.scope,
-    includeHistorical: query.scope === "family",
     limit: 1000,
     includeContextWeight: true,
   };

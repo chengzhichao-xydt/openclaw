@@ -1,13 +1,13 @@
 import { definePage } from "@openclaw/uirouter";
 import { html } from "lit";
-import type { CostUsageSummary } from "../../api/types.ts";
+import { routePageSpec } from "../../app-route-paths.ts";
 import type { ApplicationContext } from "../../app/context.ts";
+import { formatUiError } from "../../lib/format-error.ts";
 import {
   formatMissingOperatorReadScopeMessage,
   isMissingOperatorReadScopeError,
 } from "../../lib/gateway-errors.ts";
-import { buildSessionUsageDateParams, requestSessionUsage } from "../../lib/sessions/index.ts";
-import type { ProviderUsageSummary } from "./data-types.ts";
+import { providerUsageFromSnapshotResult, requestUsageSnapshot } from "./request-usage-snapshot.ts";
 import type { UsageRouteData } from "./usage-page.ts";
 
 function currentLocalDate(): string {
@@ -19,73 +19,76 @@ function errorMessage(error: unknown): string {
   if (isMissingOperatorReadScopeError(error)) {
     return formatMissingOperatorReadScopeMessage("usage");
   }
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
-  }
-  return typeof error === "string" ? error : "request failed";
+  return formatUiError(error, "request failed");
 }
 
 async function loadUsageRouteData(context: ApplicationContext): Promise<UsageRouteData> {
-  const gateway = context.gateway.snapshot;
+  const gateway = context.gateway;
+  const gatewaySnapshot = gateway.snapshot;
   const startDate = currentLocalDate();
   const query: UsageRouteData["query"] = {
     startDate,
     endDate: startDate,
     scope: "family",
     timeZone: "local",
-    agentId: null,
+    agentId: context.agentSelection.state.scopeId,
   };
-  if (!gateway.connected || !gateway.client) {
+  if (gatewaySnapshot.phase !== "connected" || !gatewaySnapshot.client) {
     return {
-      client: gateway.client,
-      connected: gateway.connected,
+      gateway,
+      gatewaySnapshot,
       query,
       result: null,
       costSummary: null,
-      providerUsageSummary: null,
+      providerUsage: { state: "pending" },
+      loadedAtMs: null,
       error: null,
     };
   }
 
   try {
-    const [result, costSummary, providerUsageSummary] = await Promise.all([
-      requestSessionUsage(gateway.client, {
-        ...query,
-        agentId: query.agentId ?? undefined,
-      }),
-      gateway.client.request<CostUsageSummary>("usage.cost", {
-        startDate: query.startDate,
-        endDate: query.endDate,
-        agentScope: "all",
-        ...buildSessionUsageDateParams(query.timeZone),
-      }),
-      gateway.client.request<ProviderUsageSummary>("usage.status").catch(() => null),
-    ]);
+    const snapshot = await requestUsageSnapshot(gatewaySnapshot.client, {
+      ...query,
+      agentId: query.agentId ?? undefined,
+    });
+    if (snapshot.ok) {
+      return {
+        gateway,
+        gatewaySnapshot,
+        query,
+        result: snapshot.value.result,
+        costSummary: snapshot.value.costSummary,
+        providerUsage: snapshot.value.providerUsage,
+        loadedAtMs: Date.now(),
+        error: null,
+      };
+    }
     return {
-      client: gateway.client,
-      connected: true,
-      query,
-      result,
-      costSummary,
-      providerUsageSummary,
-      error: null,
-    };
-  } catch (error) {
-    return {
-      client: gateway.client,
-      connected: true,
+      gateway,
+      gatewaySnapshot,
       query,
       result: null,
       costSummary: null,
-      providerUsageSummary: null,
+      providerUsage: providerUsageFromSnapshotResult(snapshot),
+      loadedAtMs: null,
+      error: errorMessage(snapshot.error.cause),
+    };
+  } catch (error) {
+    return {
+      gateway,
+      gatewaySnapshot,
+      query,
+      result: null,
+      costSummary: null,
+      providerUsage: { state: "pending" },
+      loadedAtMs: null,
       error: errorMessage(error),
     };
   }
 }
 
 export const page = definePage({
-  id: "usage",
-  path: "/usage",
+  ...routePageSpec("usage"),
   loader: loadUsageRouteData,
   component: () =>
     import("./usage-page.ts").then(() => ({

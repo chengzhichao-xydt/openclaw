@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { deleteTestEnvValue, setTestEnvValue } from "../../test-utils/env.js";
 import { cleanupSessionStateForTest } from "../../test-utils/session-state-cleanup.js";
 
@@ -82,7 +83,7 @@ function setTempHome(base: string) {
   if (!match) {
     return;
   }
-  setTestEnvValue("HOMEDRIVE", match[1]);
+  setTestEnvValue("HOMEDRIVE", expectDefined(match[1], "temp home regex capture 1"));
   setTestEnvValue("HOMEPATH", match[2] || "\\");
 }
 
@@ -101,7 +102,7 @@ async function allocateTempHomeBase(prefix: string): Promise<string> {
   return base;
 }
 
-export async function withTempHome<T>(
+export async function withTempHomeCore<T>(
   fn: (home: string) => Promise<T>,
   opts: {
     env?: Record<string, EnvValue>;
@@ -138,7 +139,9 @@ export async function withTempHome<T>(
     return await fn(base);
   } finally {
     if (!opts.skipSessionCleanup) {
-      await cleanupSessionStateForTest().catch(() => undefined);
+      await cleanupSessionStateForTest({ stateDir: path.join(base, ".openclaw") }).catch(
+        () => undefined,
+      );
     }
     restoreExtraEnv(envSnapshot);
     restoreEnv(snapshot);

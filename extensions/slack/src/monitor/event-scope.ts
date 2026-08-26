@@ -1,33 +1,44 @@
 // Slack plugin module validates non-serializable per-event Enterprise Grid scope.
-import type { WebClient } from "@slack/web-api";
+import type { WebClient, WebClientOptions } from "@slack/web-api";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { getSlackListenerUploadCompletionClient } from "../client.js";
 import type { SlackInstallationIdentity } from "./enterprise-install.js";
 
-export type SlackEventScope = {
-  apiAppId: string;
-  enterpriseId: string;
+export type SlackEventScope = Readonly<{
   teamId: string;
-  isEnterpriseInstall: true;
-  // Keep Bolt's exact listener client: Bolt pools it by authorized team and WebClient injects
-  // that client's team_id into every API call. Do not recreate it or add team_id payloads here.
+  // Keep Bolt's exact listener client for ordinary reads and writes.
   client: WebClient;
-};
+  // Completion is one-shot, so uploads finalize through a team-scoped client
+  // that cannot inherit Bolt's normal request retries.
+  uploadCompletionClient?: WebClient;
+}>;
 
-export type SlackEventScopeResolution =
+type SlackEventScopeResolution =
   | { ok: true; scope?: SlackEventScope }
   | {
       ok: false;
       reason:
         | "enterprise_event_for_workspace_account"
-        | "missing_api_app_id"
         | "wrong_app"
         | "not_enterprise_install"
         | "missing_enterprise_id"
         | "wrong_enterprise"
         | "missing_team_id"
-        | "invalid_team_id"
         | "missing_listener_client";
     };
+
+export function resolveSlackListenerEventScope(
+  params: Parameters<typeof resolveSlackEventScope>[0] & {
+    onDrop?: (reason: Extract<SlackEventScopeResolution, { ok: false }>["reason"]) => void;
+  },
+): SlackEventScope | null | undefined {
+  const resolved = resolveSlackEventScope(params);
+  if (!resolved.ok) {
+    params.onDrop?.(resolved.reason);
+    return null;
+  }
+  return resolved.scope;
+}
 
 export function resolveSlackEventScope(params: {
   identity: SlackInstallationIdentity;
@@ -38,6 +49,7 @@ export function resolveSlackEventScope(params: {
     teamId?: unknown;
   };
   client?: WebClient;
+  clientOptions?: WebClientOptions;
 }): SlackEventScopeResolution {
   const context = params.context ?? {};
   if (params.identity.kind !== "enterprise") {
@@ -48,10 +60,7 @@ export function resolveSlackEventScope(params: {
   const body =
     params.body && typeof params.body === "object" ? (params.body as { api_app_id?: unknown }) : {};
   const apiAppId = normalizeOptionalString(body.api_app_id);
-  if (!apiAppId) {
-    return { ok: false, reason: "missing_api_app_id" };
-  }
-  if (params.identity.apiAppId && apiAppId !== params.identity.apiAppId) {
+  if (apiAppId && params.identity.apiAppId && apiAppId !== params.identity.apiAppId) {
     return { ok: false, reason: "wrong_app" };
   }
   if (context.isEnterpriseInstall !== true) {
@@ -68,20 +77,20 @@ export function resolveSlackEventScope(params: {
   if (!teamId) {
     return { ok: false, reason: "missing_team_id" };
   }
-  if (!/^T[A-Z0-9]+$/i.test(teamId)) {
-    return { ok: false, reason: "invalid_team_id" };
-  }
   if (!params.client) {
     return { ok: false, reason: "missing_listener_client" };
   }
+  const uploadCompletionClient = getSlackListenerUploadCompletionClient({
+    listenerClient: params.client,
+    teamId,
+    clientOptions: params.clientOptions,
+  });
   return {
     ok: true,
     scope: {
-      apiAppId,
-      enterpriseId,
       teamId,
-      isEnterpriseInstall: true,
       client: params.client,
+      ...(uploadCompletionClient ? { uploadCompletionClient } : {}),
     },
   };
 }

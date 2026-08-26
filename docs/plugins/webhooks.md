@@ -56,14 +56,14 @@ Route fields:
 | `controllerId` | no       | `webhooks/<routeId>`          | Used as the default `create_flow` controller. |
 | `description`  | no       | -                             | Operator note only.                           |
 
-`secret` accepts a plain string or a SecretRef: `{ source: "env" | "file" | "exec", provider: "default", id: "..." }`.
+`secret` accepts a plain string or a SecretRef: `{ source: "env" | "file" | "exec" | "store", provider: "default", id: "..." }`.
 
-Every configured route registers at startup regardless of whether its secret
-currently resolves. An unresolvable secret does not disable or skip the
-route - requests to it fail authentication (`401`) until the secret can be
-resolved. SecretRef values are re-resolved on every request, so rotating the
-underlying secret (env var, file, or exec output) takes effect without a
-Gateway restart.
+SecretRefs resolve into the Gateway's startup config snapshot. When one route's
+secret cannot resolve, the Gateway keeps running and that exact route stays
+registered but cold: requests receive a generic authentication failure (`401`).
+Other routes remain available. Fix the SecretRef source, then reload or restart
+the Gateway to activate the new snapshot. SecretRef values are never resolved
+on the public request path.
 
 ## Security model
 
@@ -142,9 +142,14 @@ with any other status returns `400 invalid_request`.
   "flowId": "flow_123",
   "runtime": "acp",
   "childSessionKey": "agent:main:acp:worker",
+  "runId": "run_123",
   "task": "Inspect the next message batch"
 }
 ```
+
+`childSessionKey` identifies the backing run but does not grant authority over it. For automatic
+lifecycle tracking and cancellation, include the exact `runId`; the backing task must be owned by
+the route's configured session. Foreign, stale, or replaced runs are rejected at use time.
 
 ## Response shape
 

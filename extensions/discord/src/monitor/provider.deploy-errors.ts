@@ -1,11 +1,11 @@
 // Discord provider module implements model/runtime integration.
 import { inspect } from "node:util";
-import {
-  parseStrictFiniteNumber,
-  parseStrictNonNegativeInteger,
-} from "openclaw/plugin-sdk/number-runtime";
 import { formatDurationSeconds } from "openclaw/plugin-sdk/runtime-env";
 import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
+import {
+  parseFiniteNumber as readFiniteNumber,
+  parseStrictNonNegativeInteger as readNonNegativeInteger,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { RateLimitError } from "../internal/discord.js";
 
@@ -102,24 +102,6 @@ function readDiscordDeployObjectField(value: unknown, field: string): unknown {
     : undefined;
 }
 
-function readFiniteNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string" && value.trim().length > 0) {
-    return parseStrictFiniteNumber(value);
-  }
-  return undefined;
-}
-
-function readNonNegativeInteger(value: unknown): number | undefined {
-  return parseStrictNonNegativeInteger(value);
-}
-
-function formatDurationMs(ms: number): string {
-  return formatDurationSeconds(ms, { decimals: ms >= 1000 ? 1 : 0 });
-}
-
 function isAbortLikeError(err: unknown): boolean {
   if (!err || typeof err !== "object") {
     return false;
@@ -176,10 +158,14 @@ export function formatDiscordDeployErrorMessage(err: unknown): string {
   }
   const timing: string[] = [];
   if (timeoutMs !== undefined) {
-    timing.push(`timeout=${formatDurationMs(timeoutMs)}`);
+    timing.push(
+      `timeout=${formatDurationSeconds(timeoutMs, { decimals: timeoutMs >= 1000 ? 1 : 0 })}`,
+    );
   }
   if (requestMs !== undefined) {
-    timing.push(`observed=${formatDurationMs(requestMs)}`);
+    timing.push(
+      `observed=${formatDurationSeconds(requestMs, { decimals: requestMs >= 1000 ? 1 : 0 })}`,
+    );
   }
   const timingText = timing.length > 0 ? ` (${timing.join(", ")})` : "";
   if (timeoutMs !== undefined && requestMs !== undefined && requestMs >= timeoutMs) {
@@ -260,7 +246,7 @@ export function formatDiscordDeployRateLimitWarning(
   if (!rateLimit) {
     return undefined;
   }
-  const parts = [`discord: native slash command deploy rate limited for ${accountId}`];
+  const parts = [`[${accountId}] slash command deploy rate limited`];
   if (typeof rateLimit.retryAfterMs === "number") {
     parts.push(
       `retry after ${formatDurationSeconds(rateLimit.retryAfterMs, {
@@ -318,6 +304,17 @@ function formatDiscordRejectedDeployEntries(params: {
   });
 }
 
+// Discord error envelopes are usually plain {message, code}; both already
+// appear via the error message and the code= detail, so repeating the JSON
+// body would only double the line length without adding information.
+function isRedundantDiscordDeployBody(rawBody: unknown): boolean {
+  if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+    return false;
+  }
+  const keys = Object.keys(rawBody);
+  return keys.length > 0 && keys.every((key) => key === "message" || key === "code");
+}
+
 export function formatDiscordDeployErrorDetails(err: unknown): string {
   if (!err || typeof err !== "object") {
     return "";
@@ -337,7 +334,7 @@ export function formatDiscordDeployErrorDetails(err: unknown): string {
   if (typeof discordCode === "number" || typeof discordCode === "string") {
     details.push(`code=${discordCode}`);
   }
-  if (rawBody !== undefined) {
+  if (rawBody !== undefined && !isRedundantDiscordDeployBody(rawBody)) {
     let bodyText;
     try {
       bodyText = JSON.stringify(rawBody);

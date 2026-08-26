@@ -13,6 +13,7 @@ const {
   listChangedPaths,
   parseArgs,
   shouldRunNativeI18n,
+  writeGitHubOutput,
 } = await import("../../scripts/ci-changed-scope.mjs");
 
 const markerPaths: string[] = [];
@@ -102,6 +103,7 @@ describe("detectChangedScope", () => {
     for (const changedPath of [
       "apps/.i18n/native-source.json",
       "apps/android/app/src/main/java/ai/openclaw/app/MainActivity.kt",
+      "apps/android/wear/src/main/java/ai/openclaw/wear/WearScreens.kt",
       "apps/ios/Sources/RootTabs.swift",
       "apps/macos/Sources/OpenClaw/Settings.swift",
       "apps/shared/OpenClawKit/Sources/OpenClawKit/Client.swift",
@@ -129,6 +131,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: true,
       runChangedSmoke: true,
       runControlUiI18n: true,
+      runUiTests: true,
     });
   });
 
@@ -142,6 +145,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -155,6 +159,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -168,6 +173,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(
       detectChangedScope(["apps/macos-mlx-tts/Sources/OpenClawMLXTTSHelper/main.swift"]),
@@ -180,16 +186,18 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["apps/ios/Sources/RootTabs.swift"])).toEqual({
       runNode: false,
-      runMacos: true,
+      runMacos: false,
       runIosBuild: true,
       runAndroid: false,
       runWindows: false,
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["apps/shared/OpenClawKit/Sources/Foo.swift"])).toEqual({
       runNode: false,
@@ -200,6 +208,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["apps/swabble/Sources/SwabbleKit/WakeWordGate.swift"])).toEqual({
       runNode: false,
@@ -210,6 +219,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["Swabble/Sources/SwabbleKit/WakeWordGate.swift"])).toEqual({
       runNode: false,
@@ -220,15 +230,42 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
+  });
+
+  it("runs both Apple lanes for shared Swift tooling changes", () => {
+    for (const toolingPath of [
+      "config/swiftformat",
+      "config/swiftlint.yml",
+      "scripts/check-swift-tools.sh",
+      "scripts/format-swift.sh",
+      "scripts/install-swift-tools.sh",
+      "scripts/install-xcodegen.sh",
+      "scripts/lint-swift.sh",
+    ]) {
+      expect(detectChangedScope([toolingPath])).toEqual({
+        runNode: true,
+        runMacos: true,
+        runIosBuild: true,
+        runAndroid: false,
+        runWindows: false,
+        runSkillsPython: false,
+        runChangedSmoke: false,
+        runControlUiI18n: false,
+        runUiTests: false,
+      });
+    }
   });
 
   it("enables the iOS build lane for iOS build helper changes", () => {
     for (const helperPath of [
       "scripts/ios-team-id.sh",
+      "scripts/ios-write-swift-filelist.mjs",
+      "scripts/ios-write-swift-filelist.mts",
       "scripts/ios-version.ts",
       "scripts/lib/ios-version.ts",
-      "scripts/lib/npm-publish-plan.mjs",
+      "scripts/lib/release-version.mjs",
       "scripts/lib/version-script-args.ts",
     ]) {
       expect(detectChangedScope([helperPath])).toEqual({
@@ -240,6 +277,7 @@ describe("detectChangedScope", () => {
         runSkillsPython: false,
         runChangedSmoke: false,
         runControlUiI18n: false,
+        runUiTests: false,
       });
     }
   });
@@ -256,6 +294,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -269,6 +308,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
 
     expect(detectChangedScope([".crabbox.yaml"])).toEqual({
@@ -280,6 +320,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -293,6 +334,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -306,6 +348,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: true,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -319,10 +362,11 @@ describe("detectChangedScope", () => {
       runSkillsPython: true,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
-  it("keeps native platform lanes scoped when the CI workflow changes", () => {
+  it("runs CI-owned platform lanes when the CI workflow changes", () => {
     expect(detectChangedScope([".github/workflows/ci.yml"])).toEqual({
       runNode: true,
       runMacos: false,
@@ -332,6 +376,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: true,
     });
   });
 
@@ -354,6 +399,7 @@ describe("detectChangedScope", () => {
         runSkillsPython: false,
         runChangedSmoke: false,
         runControlUiI18n: false,
+        runUiTests: false,
       });
     }
   });
@@ -375,6 +421,7 @@ describe("detectChangedScope", () => {
         runSkillsPython: false,
         runChangedSmoke: false,
         runControlUiI18n: false,
+        runUiTests: false,
       });
     }
   });
@@ -389,6 +436,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["src/auto-reply/reply/streaming-directives.ts"])).toEqual({
       runNode: true,
@@ -399,6 +447,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["src/process/exec.ts"])).toEqual({
       runNode: true,
@@ -409,6 +458,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["src/process/exec.windows.test.ts"])).toEqual({
       runNode: true,
@@ -419,6 +469,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     for (const daemonPath of [
       "src/daemon/schtasks.ts",
@@ -436,6 +487,7 @@ describe("detectChangedScope", () => {
         runSkillsPython: false,
         runChangedSmoke: false,
         runControlUiI18n: false,
+        runUiTests: false,
       });
     }
     expect(detectChangedScope(["src/shared/runtime-import.ts"])).toEqual({
@@ -447,6 +499,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["src/shared/runtime-import.test.ts"])).toEqual({
       runNode: true,
@@ -457,8 +510,9 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
-    expect(detectChangedScope(["scripts/npm-runner.mjs"])).toEqual({
+    expect(detectChangedScope(["scripts/npm-runner.mts"])).toEqual({
       runNode: true,
       runMacos: false,
       runIosBuild: false,
@@ -467,8 +521,9 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
-    expect(detectChangedScope(["scripts/lib/format-generated-module.mjs"])).toEqual({
+    expect(detectChangedScope(["scripts/lib/format-generated-module.mts"])).toEqual({
       runNode: true,
       runMacos: false,
       runIosBuild: false,
@@ -477,6 +532,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["test/scripts/format-generated-module.test.ts"])).toEqual({
       runNode: true,
@@ -487,7 +543,27 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
+    for (const releaseCheckPath of [
+      ".github/workflows/openclaw-cross-os-release-checks-reusable.yml",
+      "scripts/github/run-openclaw-cross-os-release-checks.sh",
+      "scripts/openclaw-cross-os-release-checks.ts",
+      "scripts/lib/cross-os-release-checks/runtime.ts",
+      "test/scripts/openclaw-cross-os-release-workflow.test.ts",
+    ]) {
+      expect(detectChangedScope([releaseCheckPath]), releaseCheckPath).toEqual({
+        runNode: true,
+        runMacos: false,
+        runIosBuild: false,
+        runAndroid: false,
+        runWindows: true,
+        runSkillsPython: false,
+        runChangedSmoke: false,
+        runControlUiI18n: false,
+        runUiTests: false,
+      });
+    }
     expect(detectChangedScope(["scripts/install.ps1"])).toEqual({
       runNode: true,
       runMacos: false,
@@ -497,6 +573,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -510,6 +587,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["scripts/install-cli.sh"])).toEqual({
       runNode: true,
@@ -520,6 +598,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope([bundledPluginFile("matrix", "package.json")])).toEqual({
       runNode: true,
@@ -530,6 +609,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope([".github/workflows/install-smoke.yml"])).toEqual({
       runNode: true,
@@ -540,6 +620,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["scripts/e2e/qr-import-docker.sh"])).toEqual({
       runNode: true,
@@ -550,6 +631,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["scripts/e2e/gateway-network-docker.sh"])).toEqual({
       runNode: true,
@@ -560,6 +642,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["scripts/e2e/Dockerfile"])).toEqual({
       runNode: true,
@@ -570,6 +653,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["scripts/e2e/agents-delete-shared-workspace-docker.sh"])).toEqual({
       runNode: true,
@@ -580,6 +664,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["scripts/e2e/plugin-update-unchanged-docker.sh"])).toEqual({
       runNode: true,
@@ -590,6 +675,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["scripts/postinstall-bundled-plugins.mjs"])).toEqual({
       runNode: true,
@@ -600,6 +686,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["scripts/ci-changed-scope.mjs"])).toEqual({
       runNode: true,
@@ -610,6 +697,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -623,6 +711,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["src/plugin-sdk/provider-entry.ts"])).toEqual({
       runNode: true,
@@ -633,6 +722,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["packages/gateway-protocol/src/schema/messages.ts"])).toEqual({
       runNode: true,
@@ -643,6 +733,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["packages/gateway-client/src/client.ts"])).toEqual({
       runNode: true,
@@ -653,6 +744,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope(["src/channels/plugins/catalog.ts"])).toEqual({
       runNode: true,
@@ -663,6 +755,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: true,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope([bundledPluginFile("matrix", "index.ts")])).toEqual({
       runNode: true,
@@ -673,6 +766,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
@@ -729,6 +823,7 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
     expect(detectChangedScope([bundledPluginFile("matrix", "index.test.ts")])).toEqual({
       runNode: true,
@@ -739,11 +834,12 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: false,
+      runUiTests: false,
     });
   });
 
   it("runs control-ui locale check only for control-ui i18n surfaces", () => {
-    expect(detectChangedScope(["ui/src/i18n/locales/en.ts"])).toEqual({
+    const expected = {
       runNode: true,
       runMacos: false,
       runIosBuild: false,
@@ -752,18 +848,28 @@ describe("detectChangedScope", () => {
       runSkillsPython: false,
       runChangedSmoke: false,
       runControlUiI18n: true,
-    });
+      runUiTests: true,
+    };
+    expect(detectChangedScope(["ui/src/i18n/locales/en.ts"])).toEqual(expected);
 
-    expect(detectChangedScope(["scripts/control-ui-i18n.ts"])).toEqual({
-      runNode: true,
-      runMacos: false,
-      runIosBuild: false,
-      runAndroid: false,
-      runWindows: false,
-      runSkillsPython: false,
-      runChangedSmoke: false,
-      runControlUiI18n: true,
-    });
+    for (const scriptPath of [
+      "scripts/control-ui-i18n.ts",
+      "scripts/control-ui-i18n-verify.ts",
+      "scripts/lib/control-ui-i18n-catalog.ts",
+      "scripts/lib/control-ui-i18n-raw-copy.ts",
+      "scripts/lib/control-ui-i18n-sync-plan.ts",
+    ]) {
+      expect(detectChangedScope([scriptPath])).toEqual({ ...expected, runUiTests: false });
+    }
+  });
+
+  it.each([
+    "ui/src/pages/chat/chat-realtime.test.ts",
+    "ui/package.json",
+    "test/vitest/vitest.shared.config.ts",
+    "scripts/ensure-playwright-chromium.mts",
+  ])("runs control-ui tests for %s", (changedPath) => {
+    expect(detectChangedScope([changedPath]).runUiTests).toBe(true);
   });
 
   it("identifies plugin contract helper changes as fast Node-only CI scope", () => {
@@ -776,7 +882,7 @@ describe("detectChangedScope", () => {
         bundledCapabilityMetadataPath,
         "src/plugins/contracts/registry.ts",
         "src/plugins/contracts/tts-contract-suites.ts",
-        "scripts/test-projects.test-support.mjs",
+        "scripts/test-projects.test-support.mts",
         "test/scripts/test-projects.test.ts",
       ]),
     ).toEqual({
@@ -791,10 +897,13 @@ describe("detectChangedScope", () => {
       detectNodeFastScope([
         "scripts/check-changed.mjs",
         "scripts/ci-changed-scope.mjs",
-        "scripts/run-vitest.mjs",
-        "scripts/test-projects.test-support.d.mts",
+        "scripts/run-vitest.mts",
+        "scripts/test-projects.test-support.mts",
         "src/commands/status.scan-result.test.ts",
+        "src/scripts/ci-changed-scope.control-ui.test.ts",
+        "src/scripts/ci-changed-scope.native-i18n.test.ts",
         "src/scripts/ci-changed-scope.test.ts",
+        "src/scripts/ci-changed-scope.windows.test.ts",
         "test/scripts/changed-lanes.test.ts",
         "test/scripts/run-vitest.test.ts",
         "test/scripts/test-projects.test.ts",
@@ -867,39 +976,82 @@ describe("detectChangedScope", () => {
     expect(listChangedPaths(staleBase, "HEAD", repoDir, true)).toEqual(["src/pr.ts"]);
   });
 
-  it("keeps direct CLI preflight empty diffs as no-op scope", () => {
-    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-ci-scope-empty-"));
+  it("reports both sides of a rename so deleted paths force safe planning", () => {
+    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-ci-scope-rename-"));
+    tempDirs.push(repoDir);
+    git(repoDir, ["init", "-b", "main"]);
+    git(repoDir, ["config", "user.email", "ci@example.invalid"]);
+    git(repoDir, ["config", "user.name", "CI"]);
+    writeRepoFile(repoDir, "src/old.ts", "export const value = 1;\n");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "base"]);
+    const base = git(repoDir, ["rev-parse", "HEAD"]);
+    fs.renameSync(path.join(repoDir, "src/old.ts"), path.join(repoDir, "src/new.ts"));
+    git(repoDir, ["add", "-A"]);
+    git(repoDir, ["commit", "-m", "rename"]);
+
+    expect(listChangedPaths(base, "HEAD", repoDir)).toEqual(["src/new.ts", "src/old.ts"]);
+  });
+
+  it("drops oversized changed-path payloads before workflow environment interpolation", () => {
+    const outputPath = path.join(os.tmpdir(), `openclaw-ci-scope-output-${Date.now()}.txt`);
+    markerPaths.push(outputPath);
+    const changedPaths = Array.from(
+      { length: 1_000 },
+      (_, index) => `src/generated/${index}-${"x".repeat(100)}.ts`,
+    );
+    writeGitHubOutput(
+      detectChangedScope(["docs/ci.md"]),
+      outputPath,
+      undefined,
+      undefined,
+      false,
+      changedPaths,
+    );
+
+    expect(parseGitHubOutput(fs.readFileSync(outputPath, "utf8")).changed_paths_json).toBe("null");
+  });
+
+  it("loads from a zero-install tree and keeps empty diffs as no-op scope", () => {
+    const repoDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-ci-scope-empty-")),
+    );
     tempDirs.push(repoDir);
     const outputPath = path.join(repoDir, "github-output.txt");
-    const scriptPath = path.resolve("scripts/ci-changed-scope.mjs");
+    const scriptPath = path.join(repoDir, "scripts/ci-changed-scope.mjs");
 
     execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
     execFileSync("git", ["config", "user.email", "ci@example.invalid"], { cwd: repoDir });
     execFileSync("git", ["config", "user.name", "CI"], { cwd: repoDir });
+    for (const sourcePath of [
+      "scripts/ci-changed-scope.mjs",
+      "scripts/lib/changed-path-facts.mjs",
+      "scripts/lib/direct-run.mjs",
+      "scripts/lib/merge-head-diff-base.mjs",
+    ]) {
+      writeRepoFile(repoDir, sourcePath, fs.readFileSync(path.resolve(sourcePath), "utf8"));
+    }
     fs.writeFileSync(path.join(repoDir, "README.md"), "test\n", "utf8");
     execFileSync("git", ["add", "README.md"], { cwd: repoDir });
     execFileSync("git", ["commit", "-m", "test"], { cwd: repoDir });
 
+    expect(fs.existsSync(path.join(repoDir, "node_modules"))).toBe(false);
     execFileSync(process.execPath, [scriptPath, "--base", "HEAD", "--head", "HEAD"], {
       cwd: repoDir,
       env: { ...process.env, GITHUB_OUTPUT: outputPath },
     });
 
-    expect(parseGitHubOutput(fs.readFileSync(outputPath, "utf8"))).toEqual({
-      run_node: "false",
-      run_macos: "false",
-      run_ios_build: "false",
-      run_android: "false",
-      run_windows: "false",
-      run_skills_python: "false",
-      run_changed_smoke: "false",
-      run_node_fast_only: "false",
-      run_node_fast_plugin_contracts: "false",
-      run_node_fast_ci_routing: "false",
-      run_fast_install_smoke: "false",
-      run_full_install_smoke: "false",
-      run_control_ui_i18n: "false",
-      run_native_i18n: "false",
-    });
+    const output = parseGitHubOutput(fs.readFileSync(outputPath, "utf8"));
+    expect(Object.keys(output).toSorted()).toEqual(
+      "changed_paths_json run_android run_changed_smoke run_control_ui_i18n run_fast_install_smoke run_full_install_smoke run_ios_build run_ios_screenshots run_macos run_native_i18n run_node run_node_fast_ci_routing run_node_fast_only run_node_fast_plugin_contracts run_skills_python run_ui_tests run_windows strict_control_ui_i18n strict_native_i18n".split(
+        " ",
+      ),
+    );
+    expect(output.changed_paths_json).toBe("[]");
+    for (const [key, value] of Object.entries(output)) {
+      if (key !== "changed_paths_json") {
+        expect(value, key).toBe("false");
+      }
+    }
   });
 });
